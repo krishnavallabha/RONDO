@@ -70,6 +70,39 @@ class DeadBallTest(unittest.TestCase):
         self.assertTrue(np.all((p >= 0) & (p <= 1)))
 
 
+def teams_frame(n, spread_home, spread_away, players=11):
+    """Two teams of `players` on a circle of the given radius, the same on every frame."""
+    ang = np.linspace(0, 2 * np.pi, players, endpoint=False)
+    ring = np.column_stack([np.cos(ang), np.sin(ang)])
+    xy = np.concatenate([50 + spread_home * ring, 50 + spread_away * ring])
+    return np.repeat(xy[None], n, axis=0), np.array([0] * players + [1] * players)
+
+
+class ShapeTest(unittest.TestCase):
+    def test_wider_team_gives_positive_ratio(self):
+        xy, team = teams_frame(40, 20.0, 10.0)
+        r = m2.team_spread_ratio(xy, team)
+        np.testing.assert_allclose(r, np.log(2.0), atol=1e-9)
+        xy, team = teams_frame(40, 8.0, 16.0)
+        self.assertTrue(np.all(m2.team_spread_ratio(xy, team) < 0))
+
+    def test_too_few_players_is_nan_and_not_smoothed_over(self):
+        xy, team = teams_frame(60, 20.0, 10.0)
+        xy[20:30, :5] = np.nan                 # home down to 6 tracked players
+        r = m2.team_spread_ratio(xy, team)
+        self.assertTrue(np.isnan(r[20:30]).all())
+        self.assertFalse(np.isnan(r[:20]).any() or np.isnan(r[30:]).any())
+
+    def test_smoothing_averages_a_one_frame_blip(self):
+        xy, team = teams_frame(60, 10.0, 10.0)
+        wide, _ = teams_frame(1, 40.0, 10.0)
+        xy[30] = wide[0]
+        raw = m2.team_spread_ratio(xy, team, smooth=1)
+        smooth = m2.team_spread_ratio(xy, team)
+        self.assertGreater(raw[30], 1.0)
+        self.assertLess(smooth[30], raw[30] / 10)
+
+
 class RestartTest(unittest.TestCase):
     def setUp(self):
         self.n = 200
@@ -113,6 +146,7 @@ def m2_style_evidence():
         "smart_tag_dead": np.full(N, 0.5),
         "restart_team": np.full(N, -1, dtype=np.int8),
         "smart_tag_team": np.full(N, -1, dtype=np.int8),
+        "shape_spread": np.full(N, np.nan),
     }
     for key in ("touch_H", "touch_A", "control_H", "control_A", "duel_zone"):
         ev[key] = np.zeros(N, dtype=bool)
@@ -145,8 +179,47 @@ class ExportContractTest(unittest.TestCase):
             csv = os.path.join(tmp, "out.csv")
             np.savez_compressed(npz, **export.to_contract(m2_style_evidence()))
             run.main(["--evidence", npz, "--out", csv])
+            with np.load(npz) as saved:
+                self.assertIn("shape_spread", saved.files)
             self.assertIsNone(pm.validate_submission(pm.read_label_csv(csv), N))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def synthetic_match(n=1500, pitch=(105.0, 68.0)):
+    """Plain arrays shaped like an external match: 22 players jogging, a ball passed around."""
+    rng = np.random.default_rng(1)
+    t = np.arange(n)[:, None]
+    base = rng.uniform((10, 8), (pitch[0] - 10, pitch[1] - 8), size=(22, 2))
+    players = base[None] + 3 * np.stack([np.sin(t / 50 + np.arange(22)), np.cos(t / 60 + np.arange(22))], axis=2)
+    ball = np.column_stack([pitch[0] / 2 + 30 * np.sin(np.arange(n) / 80), pitch[1] / 2 + 20 * np.cos(np.arange(n) / 70)])
+    ball[400:430] = np.nan
+    return ball, players, np.array([0] * 11 + [1] * 11)
+
+
+class BuildEvidenceTest(unittest.TestCase):
+    def test_external_match_gives_contract_valid_evidence(self):
+        ball, players, team = synthetic_match()
+        ev, info = m2.build_evidence(ball, players, team, pitch=(105.0, 68.0))
+        self.assertEqual(set(ev), set(m2.EVIDENCE_SPEC))
+        self.assertTrue(all(len(v) == len(ball) for v in ev.values()))
+        self.assertTrue((ev["restart_team"] == -1).all())          # no Smart Tagging, no kickoffs
+        self.assertTrue((ev["smart_tag_dead"] == 0.5).all())
+        self.assertIn("clean_stats", info)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = export.save(ev, os.path.join(tmp, "ext.npz"))
+            with np.load(path) as saved:
+                contract.check({k: saved[k] for k in saved.files}, len(ball))
+
+    def test_bad_inputs_are_rejected_with_a_clear_error(self):
+        ball, players, team = synthetic_match(300)
+        with self.assertRaisesRegex(ValueError, "fps"):
+            m2.build_evidence(ball, players, team, (105.0, 68.0), fps=30)
+        with self.assertRaisesRegex(ValueError, "outside the pitch"):
+            m2.build_evidence(ball - 52.5, players - (52.5, 34.0), team, (105.0, 68.0))
+        with self.assertRaisesRegex(ValueError, "only 0"):
+            m2.build_evidence(ball, players, team + 1, (105.0, 68.0))
+        with self.assertRaisesRegex(ValueError, "expected"):
+            m2.build_evidence(ball, players[:, :20], team, (105.0, 68.0))

@@ -16,7 +16,7 @@ import rondo.signals  # noqa: F401  (puts the challenge repo and its starter/ on
 from games import GAME, GAMES, source_frames  # noqa: E402
 from load_smart_tagging import load as load_smart_tagging  # noqa: E402
 
-from rondo.signals.m1_ingest import main as ingest_atd  # noqa: E402
+from rondo.signals.m1_ingest import main as ingest_atd, clean_ball  # noqa: E402
 
 # Params
 FPS = 25
@@ -44,6 +44,8 @@ MISSING_STALE_FRAMES = 750      # 30 s: restarts come well within this, so after
 TAKER_RADIUS = 3.0              # m, a throw-in taker holds the ball, a kick taker stands over it
 TAKER_SEARCH = 50               # frames after the stoppage in which the ball must reappear
 KICKOFF_SPOT_RADIUS = 3.0       # m around the centre spot
+SHAPE_MIN_PLAYERS = 8           # per team, below this a team's spread is not measured
+SHAPE_SMOOTH = 25               # frames, centred window for the spread ratio (1 s)
 RESTART_PAD = 10                # frames each side of a localised restart frame
 SMART_TAG_DEAD_SHORT = 0.8      # prior on short restart tags (kickoffs, ~5 s)
 SMART_TAG_DEAD_LONG = 0.6       # most SET PIECES tags are a fixed 875-frame (35 s) window
@@ -185,6 +187,49 @@ def control_candidates(nearest: np.ndarray, speed: np.ndarray,
     cH = (nd[:, HOME] <= radius) & (nd[:, HOME] < nd[:, AWAY]) & slow
     cA = (nd[:, AWAY] <= radius) & (nd[:, AWAY] < nd[:, HOME]) & slow
     return cH, cA
+
+
+def team_spread_ratio(player_xy: np.ndarray, player_team: np.ndarray,
+                      min_players: int = SHAPE_MIN_PLAYERS,
+                      smooth: int = SHAPE_SMOOTH) -> np.ndarray:
+    """float[N] log(spread_H / spread_A), NaN where unknown. Works without the ball.
+
+    Spread is the root of the summed x and y variance of a team's tracked players. The team in
+    possession spreads out to make space and the defending team compacts, so positive values
+    lean H and negative lean A. Frames where either team has fewer than `min_players` tracked
+    players are NaN; the rest are averaged over a centred `smooth`-frame window (NaN-aware).
+    This is a raw feature, not a probability: its weight is to be fitted on external matches.
+    """
+    n = len(player_xy)
+    spreads = []
+    for team in (HOME, AWAY):
+        xy = player_xy[:, player_team == team, :]
+        seen = ~np.isnan(xy[..., 0])
+        cnt = seen.sum(axis=1)
+        x = np.where(seen, xy[..., 0], 0.0)
+        y = np.where(seen, xy[..., 1], 0.0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            var = ((x ** 2).sum(1) / cnt - (x.sum(1) / cnt) ** 2
+                   + (y ** 2).sum(1) / cnt - (y.sum(1) / cnt) ** 2)
+            sp = np.sqrt(np.maximum(var, 0.0))
+        sp[cnt < min_players] = np.nan
+        spreads.append(sp)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        raw = np.log(spreads[HOME] / spreads[AWAY])
+    raw[~np.isfinite(raw)] = np.nan
+    if smooth <= 1:
+        return raw
+    ok = ~np.isnan(raw)
+    csum = np.concatenate(([0.0], np.cumsum(np.where(ok, raw, 0.0))))
+    ccnt = np.concatenate(([0], np.cumsum(ok)))
+    half = smooth // 2
+    lo = np.clip(np.arange(n) - half, 0, n)
+    hi = np.clip(np.arange(n) + half + 1, 0, n)
+    total, count = csum[hi] - csum[lo], ccnt[hi] - ccnt[lo]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = total / count
+    out[~ok] = np.nan
+    return out
 
 
 def detect_duel_zone(nearest: np.ndarray, radius: float = CONTROL_RADIUS) -> np.ndarray:
@@ -334,10 +379,10 @@ def localise_restart(s: int, e: int, dead_ball, touch_H, touch_A, team=None,
 
 def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: int,
                        dead_ball, touch_H, touch_A, nearest=None, ball_xy=None,
-                       pitch=None) -> Tuple[np.ndarray, Dict[str, int]]:
+                       pitch=None, kickoffs=None) -> Tuple[np.ndarray, Dict[str, int]]:
     """restart_team int8[N]: who takes each restart, on +-RESTART_PAD frames around it.
 
-    - Kick Off (Start): published kickoff frames and owners (KICKOFFS).
+    - Kick Off (Start): `kickoffs` {half: (frame, team)}, the published frames and owners.
     - Corner / goal kick / free kick: Team tag = team performing the set piece.
     - Kick Off (After Goal): team that conceded = opposite of the preceding GOALS tag.
     - Throw-ins (Team 'N/A'): team of the first touch after the dead stretch, else the team
@@ -352,7 +397,7 @@ def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: 
     def mark(f, team):
         restart[max(0, f - RESTART_PAD):min(n_frames, f + RESTART_PAD + 1)] = team
 
-    for f, team in KICKOFFS.values():
+    for f, team in (kickoffs or {}).values():
         mark(f, team)
         stats["kickoff"] += 1
 
@@ -381,43 +426,70 @@ def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: 
 
 # ---------------------------------------------------------------- pipeline
 
-def main(game: str = GAME, data_dir: str = None, m1_data: dict = None) -> Dict[str, np.ndarray]:
-    """Full M2 pipeline. Returns the M2->M3 evidence dict:
-        ball_xy float[N,2], ball_missing bool[N], touch_H/touch_A bool[N],
-        control_H/control_A bool[N], duel_zone bool[N], dead_ball float[N] in [0,1],
-        restart_team int8[N] (-1/0/1), smart_tag_dead float[N], smart_tag_team int8[N]
+def build_evidence(ball_xy: np.ndarray, player_xy: np.ndarray, player_team: np.ndarray,
+                   pitch: Tuple[float, float], fps: int = FPS, clean: bool = True,
+                   smart_tagging: list = None,
+                   kickoffs: dict = None) -> Tuple[Dict[str, np.ndarray], dict]:
+    """M2 evidence for ANY match from plain arrays. Returns (evidence, info).
+
+    The entry point for external matches (the harness): one match's tracking in, the same keys
+    this match produces out.
+
+    ball_xy      float [N, 2] metres, NaN where the ball is not tracked.
+    player_xy    float [N, P, 2] metres, NaN where a slot is empty. Any number of slots P.
+    player_team  int [P], 0 = home (H), 1 = away (A).
+    pitch        (length, width) in metres. x runs 0..length and y 0..width from a pitch corner
+                 (for centre-origin data add length/2 and width/2 first).
+    fps          must be 25: every threshold here is per frame at 25 fps. Resample first.
+    clean        apply the M1 ball cleaning (pass False if ball_xy is already cleaned).
+    smart_tagging, kickoffs   this match only. Without them smart_tag_* and restart_team are
+                 unknown everywhere (0.5 / -1), which the contract allows.
     """
-    n_frames = source_frames("tactical", game)
-    pitch = GAMES[game]["pitch"]
+    ball_xy = np.asarray(ball_xy, dtype=float)
+    player_xy = np.asarray(player_xy, dtype=float)
+    player_team = np.asarray(player_team)
+    n = len(ball_xy)
+    if fps != FPS:
+        raise ValueError("fps must be {} (got {}): resample the tracking first".format(FPS, fps))
+    if (ball_xy.shape != (n, 2) or player_xy.ndim != 3 or player_xy.shape[0] != n
+            or player_xy.shape[2] != 2 or player_xy.shape[1] != len(player_team)):
+        raise ValueError("expected ball_xy [N,2], player_xy [N,P,2], player_team [P]; got {}, {}, {}"
+                         .format(ball_xy.shape, player_xy.shape, player_team.shape))
+    if not set(np.unique(player_team).tolist()) <= {HOME, AWAY}:
+        raise ValueError("player_team must contain only 0 (home) and 1 (away)")
+    length, width = pitch
+    px, py = player_xy[..., 0], player_xy[..., 1]
+    seen = ~np.isnan(px)
+    if seen.any():
+        outside = ((px[seen] < -10) | (px[seen] > length + 10)
+                   | (py[seen] < -10) | (py[seen] > width + 10))
+        if outside.mean() > 0.05:
+            raise ValueError("{:.0%} of player positions lie outside the pitch: coordinates must be "
+                             "metres from a pitch corner, 0..{} by 0..{}"
+                             .format(outside.mean(), length, width))
 
-    if m1_data is None:
-        print("M2: Loading M1 output")
-        m1_data = ingest_atd(game, data_dir)
-    ball_xy = m1_data['ball_xy']
-    player_xy = m1_data['player_xy']
-    player_team = m1_data['player_team']
+    info = {}
+    if clean:
+        ball_xy, info["clean_stats"] = clean_ball(ball_xy, pitch)
 
-    print("M2: Kinematics")
-    speed = ball_speed_mps(ball_xy)  # recomputed from cleaned positions, m/s
+    speed = ball_speed_mps(ball_xy)
     nearest = team_nearest(ball_xy, player_xy, player_team)
-
-    print("M2: Loading Smart Tagging")
-    smart_tagging = load_smart_tagging(game, data_dir)
-    team_map = infer_team_mapping(smart_tagging)
-    if set(team_map.values()) != {HOME, AWAY}:
-        print("  WARNING: Team tags not mapped for both sides: {}".format(team_map))
-
-    print("M2: Touches / control / duel / dead ball")
     touch_H, touch_A = detect_touches(ball_xy, nearest)
     control_H, control_A = filter_control_persistence(*control_candidates(nearest, speed))
-    duel_zone = detect_duel_zone(nearest)
     dead_ball = detect_dead_ball(ball_xy, speed, player_xy, pitch)
 
-    print("M2: Smart Tagging signals + restart owner")
-    smart_tag_team, smart_tag_dead = load_smart_tagging_phases(smart_tagging, n_frames, team_map)
-    restart_team, rstats = infer_restart_team(smart_tagging, team_map, n_frames,
-                                              dead_ball, touch_H, touch_A,
-                                              nearest=nearest, ball_xy=ball_xy, pitch=pitch)
+    if smart_tagging:
+        team_map = infer_team_mapping(smart_tagging)
+        if set(team_map.values()) != {HOME, AWAY}:
+            print("  WARNING: Team tags not mapped for both sides: {}".format(team_map))
+        smart_tag_team, smart_tag_dead = load_smart_tagging_phases(smart_tagging, n, team_map)
+    else:
+        team_map = {}
+        smart_tag_team = np.full(n, -1, dtype=np.int8)
+        smart_tag_dead = np.full(n, 0.5)
+    restart_team, info["restart_stats"] = infer_restart_team(
+        smart_tagging or [], team_map, n, dead_ball, touch_H, touch_A,
+        nearest=nearest, ball_xy=ball_xy, pitch=pitch, kickoffs=kickoffs)
 
     evidence = {
         'ball_xy': ball_xy,
@@ -426,30 +498,53 @@ def main(game: str = GAME, data_dir: str = None, m1_data: dict = None) -> Dict[s
         'touch_A': touch_A,
         'control_H': control_H,
         'control_A': control_A,
-        'duel_zone': duel_zone,
+        'duel_zone': detect_duel_zone(nearest),
         'dead_ball': dead_ball,
         'restart_team': restart_team,
         'smart_tag_dead': smart_tag_dead,
         'smart_tag_team': smart_tag_team,
+        'shape_spread': team_spread_ratio(player_xy, player_team),
     }
-    validate_evidence(evidence, n_frames)
+    validate_evidence(evidence, n)
+    return evidence, info
+
+
+def summarise(evidence: Dict[str, np.ndarray], info: dict) -> None:
+    """Print aggregate counts only, never rows."""
+    n = len(evidence['ball_missing'])
 
     def pct(a):
-        return "{:>6} frames ({:.1f}%)".format(int(np.sum(a)), 100.0 * np.sum(a) / n_frames)
+        return "{:>6} frames ({:.1f}%)".format(int(np.sum(a)), 100.0 * np.sum(a) / n)
+    db, sp = evidence['dead_ball'], evidence['shape_spread']
     print("\nM2 Evidence Summary:")
-    print("  ball_missing:   " + pct(evidence['ball_missing']))
-    print("  touch_H:        " + pct(touch_H))
-    print("  touch_A:        " + pct(touch_A))
-    print("  control_H:      " + pct(control_H))
-    print("  control_A:      " + pct(control_A))
-    print("  duel_zone:      " + pct(duel_zone))
+    for key in ('ball_missing', 'touch_H', 'touch_A', 'control_H', 'control_A', 'duel_zone'):
+        print("  {:<15} {}".format(key + ":", pct(evidence[key])))
     print("  dead_ball:      mean {:.2f}; >=0.8 on {:.1f}%; <=0.3 on {:.1f}%".format(
-        dead_ball.mean(), 100 * np.mean(dead_ball >= 0.8), 100 * np.mean(dead_ball <= 0.3)))
+        db.mean(), 100 * np.mean(db >= 0.8), 100 * np.mean(db <= 0.3)))
     print("  restart_team:   {} frames known; sources {}".format(
-        int(np.sum(restart_team >= 0)), rstats))
+        int(np.sum(evidence['restart_team'] >= 0)), info.get("restart_stats")))
     print("  smart_tag_team: H {} / A {} frames".format(
-        int(np.sum(smart_tag_team == HOME)), int(np.sum(smart_tag_team == AWAY))))
-    print("  smart_tag_dead: {} frames at 0.8".format(int(np.sum(smart_tag_dead >= 0.8))))
+        int(np.sum(evidence['smart_tag_team'] == HOME)),
+        int(np.sum(evidence['smart_tag_team'] == AWAY))))
+    print("  smart_tag_dead: {} frames at 0.8".format(int(np.sum(evidence['smart_tag_dead'] >= 0.8))))
+    print("  shape_spread:   known on {:.1f}% of frames, {:.1f}% of ball-missing frames".format(
+        100 * np.mean(~np.isnan(sp)), 100 * np.mean(~np.isnan(sp[evidence['ball_missing']]))))
+
+
+def main(game: str = GAME, data_dir: str = None, m1_data: dict = None) -> Dict[str, np.ndarray]:
+    """Evidence for THIS match: tactical ATD, its Smart Tagging and the published kickoffs."""
+    if m1_data is None:
+        print("M2: Loading M1 output")
+        m1_data = ingest_atd(game, data_dir)
+    print("M2: Loading Smart Tagging")
+    smart_tagging = load_smart_tagging(game, data_dir)
+    print("M2: Building evidence")
+    evidence, info = build_evidence(m1_data['ball_xy'], m1_data['player_xy'],
+                                    m1_data['player_team'], GAMES[game]["pitch"], clean=False,
+                                    smart_tagging=smart_tagging, kickoffs=KICKOFFS)
+    if len(evidence['ball_missing']) != source_frames("tactical", game):
+        raise ValueError("evidence length does not match the tactical video")
+    summarise(evidence, info)
     return evidence
 
 
@@ -460,6 +555,7 @@ EVIDENCE_SPEC = {
     'duel_zone': (np.bool_, 1), 'dead_ball': (np.floating, 1),
     'restart_team': (np.integer, 1), 'smart_tag_dead': (np.floating, 1),
     'smart_tag_team': (np.integer, 1),
+    'shape_spread': (np.floating, 1),
 }
 
 

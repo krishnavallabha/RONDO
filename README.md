@@ -80,6 +80,21 @@ python -m rondo.signals.export --out out/evidence.npz
 python -m rondo.run --evidence out/evidence.npz --out out/RONDO.csv
 ```
 
+Evidence for any other match (the harness), from plain arrays in metres from a pitch corner at
+25 fps:
+
+```python
+from rondo.signals.m2_evidence import build_evidence
+from rondo.signals.export import save
+
+evidence, info = build_evidence(ball_xy, player_xy, player_team, pitch=(105.0, 68.0))
+save(evidence, "out/external/match1.npz")   # contract-checked, ready for rondo.run
+```
+
+`ball_xy` is `[N, 2]`, `player_xy` is `[N, P, 2]` with NaN for empty slots, and `player_team` is
+`[P]` with 0 = home and 1 = away. It rejects other frame rates and centre-origin coordinates with a
+clear error. Without Smart Tagging, `restart_team` and `smart_tag_*` come out as unknown.
+
 Optional one-off M0 inspection of the ATD channels (`ball_state`, `ball_owning_team`) needs
 `kloppy`, which the pipeline itself does not:
 
@@ -124,6 +139,7 @@ Signals saves one array per key with `np.savez_compressed`, indexed by **tactica
 | **`restart_team`** | **float** | 0 = H, 1 = A | **`NaN`** |
 | `smart_tag_dead` | float [0–1] | Smart Tagging set-piece/goal prior | `0.5` |
 | **`smart_tag_team`** | **float** | Smart Tagging team tag (soft only) | **`NaN`** |
+| `shape_spread` *(proposed, optional)* | float | log(spread H / spread A) of player positions, 1 s smoothed; > 0 leans H. Works when the ball is missing. Raw feature: weight to be fitted on external matches | `NaN` |
 
 > [!IMPORTANT]
 > **`restart_team` and `smart_tag_team` are floats, and unknown is `NaN`, not `-1`.**
