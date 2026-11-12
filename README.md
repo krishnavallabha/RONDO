@@ -24,8 +24,8 @@ For each of the **199,319** frames of the tactical video, RONDO writes one label
 
 | Label | Meaning |
 |:-:|---|
-| `H` | Home team in possession, ball alive |
-| `A` | Away team in possession, ball alive |
+| `H` | Home (FC Barcelona) in possession, ball alive |
+| `A` | Away (Athletic Club) in possession, ball alive |
 | `D` | Dead ball |
 | `X` | No answer (only written where nothing is scored: before kickoff, halftime, after the whistle) |
 
