@@ -1,7 +1,8 @@
 """M2 -> M3 emission contract: what Signals (A) hands the Decoder (B).
 
 One array per key, indexed by TACTICAL VIDEO FRAME (row i = submission row i, length 199319).
-A maps tracking IdFrame -> video frame with games.id_to_video before saving. Frames with no
+The tactical ATD is on the video timeline: video_frame = frame_id - 1 (starter/load_atd.py).
+games.id_to_video is for the ground truth's separate IdFrame counter, not the ATD. Frames with no
 tracking (before kickoff, halftime, after the whistle) carry the missing value.
 
 Handoff file: np.savez_compressed("evidence.npz", **evidence).
