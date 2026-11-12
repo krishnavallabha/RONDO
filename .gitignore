@@ -1,0 +1,14 @@
+# Match data is gated and must never be committed.
+data/
+*.mp4
+*.npz
+
+# Generated submissions and outputs.
+out/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.idea/
+.vscode/
