@@ -70,10 +70,22 @@ python more-than-a-hack-2027/evaluation/validate_submission.py out/dummy.csv
 python -m unittest discover -s tests -v
 ```
 
-With real evidence from M2:
+With real evidence (needs the match data, see below):
 
 ```bash
+# M1 + M2: tracking data -> out/evidence.npz (about 5 minutes)
+python -m rondo.signals.export --out out/evidence.npz
+
+# M3: evidence -> validated submission CSV
 python -m rondo.run --evidence out/evidence.npz --out out/RONDO.csv
+```
+
+Optional one-off M0 inspection of the ATD channels (`ball_state`, `ball_owning_team`) needs
+`kloppy`, which the pipeline itself does not:
+
+```bash
+pip install -r requirements-m0.txt
+python -m rondo.signals.m0_inspect
 ```
 
 The match data is gated and is **not** in this repo. Unpack it into
@@ -89,7 +101,8 @@ RONDO/
 │   ├── decoder.py      M3 HMM + Viterbi, graded-range and X policy
 │   ├── submission.py   CSV writer, re-checked with the official validator
 │   ├── dummy.py        synthetic evidence for running end to end without data
-│   └── run.py          evidence → decoder → CSV
+│   ├── run.py          evidence → decoder → CSV
+│   └── signals/        Signals (A): M0 inspect, M1 ingest + ball cleaning, M2 evidence, export
 ├── tests/              unit + end-to-end tests (run in CI)
 ├── more-than-a-hack-2027/   official challenge repo: scorer, rules, starter code
 └── .github/workflows/  CI: tests, dummy run, official validator
@@ -108,9 +121,23 @@ Signals saves one array per key with `np.savez_compressed`, indexed by **tactica
 | `control_H` / `control_A` | bool | team has sustained control (k frames) | `False` |
 | `duel_zone` | bool | both teams within control radius | `False` |
 | `dead_ball` | float [0–1] | soft probability of dead ball | `0.5` |
-| `restart_team` | float | 0 = H, 1 = A | `NaN` |
+| **`restart_team`** | **float** | 0 = H, 1 = A | **`NaN`** |
 | `smart_tag_dead` | float [0–1] | Smart Tagging set-piece/goal prior | `0.5` |
-| `smart_tag_team` | float | Smart Tagging team tag (soft only) | `NaN` |
+| **`smart_tag_team`** | **float** | Smart Tagging team tag (soft only) | **`NaN`** |
+
+> [!IMPORTANT]
+> **`restart_team` and `smart_tag_team` are floats, and unknown is `NaN`, not `-1`.**
+>
+> - Valid values are exactly `0.0` (H), `1.0` (A) or `NaN` (unknown). `contract.check` rejects anything else.
+> - Signals' internal arrays use `-1` for unknown, but `python -m rondo.signals.export` converts them
+>   before saving, so the decoder never sees `-1`.
+> - Decoder code must test with `np.isnan(x)` or `x == 0` / `x == 1`. **Do not** write `x == -1`,
+>   `x < 0` or `x >= 0`: `NaN` compares false to everything, so those checks silently match nothing.
+> - Mask before arithmetic, for example `known = ~np.isnan(ev["restart_team"])`, or `NaN` will
+>   spread through any sum, mean or log built on these keys.
+>
+> Every other key has no `NaN`: booleans use `False`, probabilities use `0.5`, and only `ball_xy`
+> is `NaN` where the ball is missing (check `ball_missing` first).
 
 ## Team
 
@@ -123,6 +150,7 @@ Signals saves one array per key with `np.savez_compressed`, indexed by **tactica
 ## Progress
 
 - [x] **Nov 12** Decoder skeleton on dummy evidence, graded-range + X handling, CSV writer, validator in CI
+- [x] **Nov 12** Signals M0 (no Metrica possession channel in the export), M1 ingest + ball cleaning, M2 evidence; real `evidence.npz` passes `contract.check` and decodes to a CSV the official validator accepts
 - [ ] **Nov 12** Lock the M2 → M3 contract with the whole team
 - [ ] **Nov 13** Full HMM with minimum durations + restart logic; **first valid upload**
 - [ ] **Nov 14** Boundary snapping + expected-F1 decoding; core pipeline frozen
