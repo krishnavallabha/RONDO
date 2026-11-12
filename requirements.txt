@@ -1,3 +1,8 @@
 numpy==2.3.2
 pandas==2.3.2
 scipy==1.16.2
+
+# pandas' own dependencies, pinned so the environment is fully fixed (Python 3.13)
+python-dateutil==4.0.0
+pytz==2026.6
+tzdata==2026.6

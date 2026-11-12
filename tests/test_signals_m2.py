@@ -199,6 +199,40 @@ def synthetic_match(n=1500, pitch=(105.0, 68.0)):
     return ball, players, np.array([0] * 11 + [1] * 11)
 
 
+class KickoffOwnerTest(unittest.TestCase):
+    def lineup(self, kicker):
+        """Kicking team: one player on the spot. Opponents: all at least 10 m away."""
+        centre = np.array([52.5, 34.0])
+        kicking = centre + np.array([[0.5, 0.0]] + [[-15.0 - i, 0.0] for i in range(10)])
+        waiting = centre + np.array([[12.0 + i, 0.0] for i in range(11)])
+        home, away = (kicking, waiting) if kicker == m2.HOME else (waiting, kicking)
+        xy = np.concatenate([home, away])
+        return np.repeat(xy[None], 40, axis=0), np.array([0] * 11 + [1] * 11)
+
+    def test_kicking_team_read_from_positions(self):
+        for kicker in (m2.HOME, m2.AWAY):
+            xy, team = self.lineup(kicker)
+            self.assertEqual(m2.kickoff_owner(xy, team, 30, (105.0, 68.0)), kicker)
+
+    def test_unclear_lineup_gives_unknown(self):
+        xy, team = self.lineup(m2.HOME)
+        xy[:, 11:] = xy[:, :11] + 0.3          # both teams crowd the spot
+        self.assertEqual(m2.kickoff_owner(xy, team, 30, (105.0, 68.0)), -1)
+
+
+class KickoffAlternationTest(unittest.TestCase):
+    def test_second_half_owner_follows_from_the_first(self):
+        n = 400
+        xy, team = KickoffOwnerTest().lineup(m2.AWAY)
+        players = np.repeat(xy[:1], n, axis=0)
+        players[200:] += np.array([0.0, 30.0])      # second-half lineup unreadable: nobody at the spot
+        ball = np.full((n, 2), np.nan)
+        ev, info = m2.build_evidence(ball, players, team, (105.0, 68.0), clean=False,
+                                     kickoffs={"1st Half": 30, "2nd Half": 300})
+        self.assertEqual(info["kickoff_owners"], {"1st Half": m2.AWAY, "2nd Half": m2.HOME})
+        self.assertEqual(ev["restart_team"][300], m2.HOME)
+
+
 class BuildEvidenceTest(unittest.TestCase):
     def test_external_match_gives_contract_valid_evidence(self):
         ball, players, team = synthetic_match()

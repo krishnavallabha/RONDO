@@ -50,9 +50,10 @@ RESTART_PAD = 10                # frames each side of a localised restart frame
 SMART_TAG_DEAD_SHORT = 0.8      # prior on short restart tags (kickoffs, ~5 s)
 SMART_TAG_DEAD_LONG = 0.6       # most SET PIECES tags are a fixed 875-frame (35 s) window
 SHORT_TAG_FRAMES = 250
-# Published kickoff frames (DATA.md / FAQ.md). 1st-half owner A: public GT frame 11185 is 'A'
-# (also visible on video); 2nd half is the other team by the Laws of the Game.
-KICKOFFS = {"1st Half": (11185, 1), "2nd Half": (113742, 0)}
+# Kickoff frames as published in the challenge docs (DATA.md / FAQ.md). Who kicks off is NOT
+# hard-coded: kickoff_owner() reads it from the tracking.
+KICKOFF_FRAMES = {"1st Half": 11185, "2nd Half": 113742}
+KICKOFF_LOOKBACK = 25           # frames before the kick in which players stand set
 
 HOME, AWAY = 0, 1
 TEAM_ALIASES = {HOME: ("barcelona", "barca", "barça"),
@@ -382,7 +383,7 @@ def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: 
                        pitch=None, kickoffs=None) -> Tuple[np.ndarray, Dict[str, int]]:
     """restart_team int8[N]: who takes each restart, on +-RESTART_PAD frames around it.
 
-    - Kick Off (Start): `kickoffs` {half: (frame, team)}, the published frames and owners.
+    - Kick Off (Start): `kickoffs` {half: (frame, team)}, owners read from tracking.
     - Corner / goal kick / free kick: Team tag = team performing the set piece.
     - Kick Off (After Goal): team that conceded = opposite of the preceding GOALS tag.
     - Throw-ins (Team 'N/A'): team of the first touch after the dead stretch, else the team
@@ -426,6 +427,35 @@ def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: 
 
 # ---------------------------------------------------------------- pipeline
 
+def kickoff_owner(player_xy: np.ndarray, player_team: np.ndarray, frame: int,
+                  pitch: Tuple[float, float], lookback: int = KICKOFF_LOOKBACK) -> int:
+    """Team taking a kickoff, from tracking: HOME, AWAY, or -1 if it cannot be told.
+
+    Law 8: at a kickoff only the kicking team may be in the centre circle; opponents stay
+    9.15 m away. So over the second before the kick, the team whose nearest player is at the
+    centre spot (within KICKOFF_SPOT_RADIUS) while the other team's nearest is outside the
+    circle is the kicking team.
+    """
+    lo = max(0, frame - lookback)
+    xy = player_xy[lo:frame + 1]
+    if not len(xy):
+        return -1
+    centre = np.array([pitch[0] / 2, pitch[1] / 2])
+    d = np.linalg.norm(xy - centre, axis=2)
+    nearest = []
+    for team in (HOME, AWAY):
+        dt = d[:, player_team == team]
+        dt = np.where(np.isnan(dt), np.inf, dt).min(axis=1)
+        dt = dt[np.isfinite(dt)]
+        nearest.append(np.median(dt) if len(dt) else np.inf)
+    dH, dA = nearest
+    if dH <= KICKOFF_SPOT_RADIUS and dA > 9.15 - 1.0:
+        return HOME
+    if dA <= KICKOFF_SPOT_RADIUS and dH > 9.15 - 1.0:
+        return AWAY
+    return -1
+
+
 def build_evidence(ball_xy: np.ndarray, player_xy: np.ndarray, player_team: np.ndarray,
                    pitch: Tuple[float, float], fps: int = FPS, clean: bool = True,
                    smart_tagging: list = None,
@@ -442,8 +472,9 @@ def build_evidence(ball_xy: np.ndarray, player_xy: np.ndarray, player_team: np.n
                  (for centre-origin data add length/2 and width/2 first).
     fps          must be 25: every threshold here is per frame at 25 fps. Resample first.
     clean        apply the M1 ball cleaning (pass False if ball_xy is already cleaned).
-    smart_tagging, kickoffs   this match only. Without them smart_tag_* and restart_team are
-                 unknown everywhere (0.5 / -1), which the contract allows.
+    smart_tagging, kickoffs   this match only. `kickoffs` is {half: frame}; the owner of
+                 each is read from the tracking by kickoff_owner(). Without them smart_tag_*
+                 and restart_team are unknown everywhere (0.5 / -1), which the contract allows.
     """
     ball_xy = np.asarray(ball_xy, dtype=float)
     player_xy = np.asarray(player_xy, dtype=float)
@@ -487,9 +518,18 @@ def build_evidence(ball_xy: np.ndarray, player_xy: np.ndarray, player_team: np.n
         team_map = {}
         smart_tag_team = np.full(n, -1, dtype=np.int8)
         smart_tag_dead = np.full(n, 0.5)
+    owners = {half: (f, kickoff_owner(player_xy, player_team, f, pitch))
+              for half, f in (kickoffs or {}).items()}
+    known = [team for _, team in owners.values() if team >= 0]
+    if len(owners) == 2 and len(known) == 1:
+        # Law 8: the team that did not kick off the first half kicks off the second.
+        owners = {half: (f, team if team >= 0 else 1 - known[0])
+                  for half, (f, team) in owners.items()}
+    info["kickoff_owners"] = {half: team for half, (_, team) in owners.items()}
     restart_team, info["restart_stats"] = infer_restart_team(
         smart_tagging or [], team_map, n, dead_ball, touch_H, touch_A,
-        nearest=nearest, ball_xy=ball_xy, pitch=pitch, kickoffs=kickoffs)
+        nearest=nearest, ball_xy=ball_xy, pitch=pitch,
+        kickoffs={half: ft for half, ft in owners.items() if ft[1] >= 0})
 
     evidence = {
         'ball_xy': ball_xy,
@@ -521,8 +561,9 @@ def summarise(evidence: Dict[str, np.ndarray], info: dict) -> None:
         print("  {:<15} {}".format(key + ":", pct(evidence[key])))
     print("  dead_ball:      mean {:.2f}; >=0.8 on {:.1f}%; <=0.3 on {:.1f}%".format(
         db.mean(), 100 * np.mean(db >= 0.8), 100 * np.mean(db <= 0.3)))
-    print("  restart_team:   {} frames known; sources {}".format(
-        int(np.sum(evidence['restart_team'] >= 0)), info.get("restart_stats")))
+    print("  restart_team:   {} frames known; sources {}; kickoff owners {}".format(
+        int(np.sum(evidence['restart_team'] >= 0)), info.get("restart_stats"),
+        info.get("kickoff_owners")))
     print("  smart_tag_team: H {} / A {} frames".format(
         int(np.sum(evidence['smart_tag_team'] == HOME)),
         int(np.sum(evidence['smart_tag_team'] == AWAY))))
@@ -541,7 +582,7 @@ def main(game: str = GAME, data_dir: str = None, m1_data: dict = None) -> Dict[s
     print("M2: Building evidence")
     evidence, info = build_evidence(m1_data['ball_xy'], m1_data['player_xy'],
                                     m1_data['player_team'], GAMES[game]["pitch"], clean=False,
-                                    smart_tagging=smart_tagging, kickoffs=KICKOFFS)
+                                    smart_tagging=smart_tagging, kickoffs=KICKOFF_FRAMES)
     if len(evidence['ball_missing']) != source_frames("tactical", game):
         raise ValueError("evidence length does not match the tactical video")
     summarise(evidence, info)
