@@ -19,3 +19,5 @@ jobs:
         run: python -m rondo.run --dummy --out out/dummy.csv
       - name: Official validator
         run: python more-than-a-hack-2027/evaluation/validate_submission.py out/dummy.csv
+      - name: Harness CLI (no external data in CI, so this only has to not break)
+        run: python -m rondo.harness status

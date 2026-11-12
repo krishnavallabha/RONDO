@@ -95,6 +95,14 @@ save(evidence, "out/external/match1.npz")   # contract-checked, ready for rondo.
 `[P]` with 0 = home and 1 = away. It rejects other frame rates and centre-origin coordinates with a
 clear error. Without Smart Tagging, `restart_team` and `smart_tag_*` come out as unknown.
 
+The validation harness needs no match data at all — it runs on public external matches:
+
+```bash
+python -m rondo.harness fetch      # IDSSE + Metrica sample, ~2.6 GB into data/external/
+python -m rondo.harness labels     # external data -> H/A/D labels.csv per match
+python -m rondo.harness score --baseline all --bootstrap 400
+```
+
 Optional one-off M0 inspection of the ATD channels (`ball_state`, `ball_owning_team`) needs
 `kloppy`, which the pipeline itself does not:
 
@@ -117,7 +125,9 @@ RONDO/
 │   ├── submission.py   CSV writer, re-checked with the official validator
 │   ├── dummy.py        synthetic evidence for running end to end without data
 │   ├── run.py          evidence → decoder → CSV
-│   └── signals/        Signals (A): M0 inspect, M1 ingest + ball cleaning, M2 evidence, export
+│   ├── signals/        Signals (A): M0 inspect, M1 ingest + ball cleaning, M2 evidence, export
+│   └── harness/        Harness (C): external data, H/A/D labels, official scorer, results sheet
+├── docs/               EXTERNAL_DATA.md — provenance, label rules, decision rule
 ├── tests/              unit + end-to-end tests (run in CI)
 ├── more-than-a-hack-2027/   official challenge repo: scorer, rules, starter code
 └── .github/workflows/  CI: tests, dummy run, official validator
@@ -155,6 +165,25 @@ Signals saves one array per key with `np.savez_compressed`, indexed by **tactica
 > Every other key has no `NaN`: booleans use `False`, probabilities use `0.5`, and only `ball_xy`
 > is `NaN` where the ball is missing (check `ball_missing` first).
 
+## Validation harness
+
+Nothing is tuned on this match. Parameters are chosen on external matches with known labels:
+
+| Dataset | Matches | Labels | Role |
+|---|---|---|---|
+| IDSSE / Sportec | 7 Bundesliga, 25 fps | read from the provider's `BallStatus` + `BallPossession` | held-out; the keep-or-drop decision |
+| Metrica sample | 2, 25 fps | derived from their event CSV | convention anchor (same authors as this ground truth) |
+
+Each external match is stored in submission shape and scored with
+`more-than-a-hack-2027/evaluation/possession_metrics.py` — imported, never reimplemented — so a
+harness number means the same thing as a leaderboard number. A change is kept only if it beats
+the bootstrap noise band (0.04 spellF1), which `score.keep` decides, not us.
+
+First calibration off the harness: perfect labels with every boundary half a second late score
+**0.79** spellF1, and a full second late **0.62**. Timing is most of this metric.
+
+Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md).
+
 ## Team
 
 | | Role | Owns |
@@ -167,6 +196,7 @@ Signals saves one array per key with `np.savez_compressed`, indexed by **tactica
 
 - [x] **Nov 12** Decoder skeleton on dummy evidence, graded-range + X handling, CSV writer, validator in CI
 - [x] **Nov 12** Signals M0 (no Metrica possession channel in the export), M1 ingest + ball cleaning, M2 evidence; real `evidence.npz` passes `contract.check` and decodes to a CSV the official validator accepts
+- [x] **Nov 12** Harness: IDSSE + Metrica sample downloaded and pinned, converted to H/A/D labels, official scorer wired to external matches with a bootstrap results sheet ([docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md))
 - [ ] **Nov 12** Lock the M2 → M3 contract with the whole team
 - [ ] **Nov 13** Full HMM with minimum durations + restart logic; **first valid upload**
 - [ ] **Nov 14** Boundary snapping + expected-F1 decoding; core pipeline frozen
