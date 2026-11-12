@@ -73,7 +73,7 @@ python -m unittest discover -s tests -v
 With real evidence (needs the match data, see below):
 
 ```bash
-# M1 + M2: tracking data -> out/evidence.npz (about 5 minutes)
+# M1 + M2: tracking data -> out/evidence.npz (under a minute)
 python -m rondo.signals.export --out out/evidence.npz
 
 # M3: evidence -> validated submission CSV

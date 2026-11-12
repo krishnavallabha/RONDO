@@ -1,7 +1,7 @@
 """M1 -- Ingest tactical ATD and produce cleaned ball + team features.
 
 Parses the XML team-slot mapping, streams the raw ATD txt into NumPy arrays,
-applies ball cleaning (teleport rejection, gap bridging, Kalman smoothing),
+applies ball cleaning (out-of-pitch and teleport rejection, gap bridging, zero-phase smoothing),
 and computes per-frame team features (nearest_dist, n_within_radius, centroid).
 
 Output: a dict with arrays and features ready for M2 evidence generation.
@@ -23,11 +23,23 @@ MISSING = "N"
 
 HOME, AWAY = 0, 1
 
+FPS = 25
+
 # Ball cleaning thresholds (from handoff)
 TELEPORT_SPEED_LIMIT = 40.0  # m/s
-TELEPORT_DIST_PER_FRAME = TELEPORT_SPEED_LIMIT / 25.0  # ~1.6 m per frame
+TELEPORT_DIST_PER_FRAME = TELEPORT_SPEED_LIMIT / FPS  # ~1.6 m per frame
 GAP_BRIDGE_UNCONDITIONAL = 12  # frames
 GAP_BRIDGE_CONDITIONAL = 50  # frames (when velocity vectors agree)
+
+# Ball cleaning details
+POSITION_MARGIN = 10.0        # m beyond a pitch line; further out is tracking junk, not play
+EDGE_MIN_FRAMES = 5           # a leading/trailing segment shorter than this next to a jump is dropped
+VELOCITY_FRAMES = 3           # frames averaged to get the velocity at a gap edge
+STATIONARY_STEP = 0.05        # m/frame (1.25 m/s): below this the ball counts as still
+VELOCITY_ANGLE_DEG = 30.0     # entry/exit directions must agree within this
+VELOCITY_SPEED_RATIO = 3.0    # entry/exit speeds must agree within this factor (ball slows in flight)
+SMOOTH_CUTOFF = 0.1           # Butterworth cutoff, fraction of Nyquist (1.25 Hz at 25 fps)
+SMOOTH_MIN_RUN = 16           # frames; shorter observed runs are not smoothed
 
 # Team features
 CONTROL_RADIUS = 1.5  # metres, ball within this = control candidate
@@ -109,101 +121,162 @@ def ingest_raw(raw_path, team_of_track, n_frames, pitch):
     return ball_xy, ball_speed, ball_valid, player_xy, team_of_track
 
 
-def clean_ball_teleports(ball_xy, ball_speed):
-    """Mark positions as invalid if speed exceeds physical limit.
+def _runs(mask):
+    """[(start, stop)) of each maximal run of True in `mask`."""
+    padded = np.concatenate(([False], np.asarray(mask, dtype=bool), [False])).astype(np.int8)
+    edges = np.diff(padded)
+    return list(zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
-    Returns ball_valid (bool array) marking frames where ball is plausible.
+
+def reject_out_of_pitch(ball_xy, pitch, margin=POSITION_MARGIN):
+    """NaN the positions further than `margin` metres outside the pitch. Returns (xy, n_rejected)."""
+    length, width = pitch
+    xy = ball_xy.copy()
+    x, y = xy[:, 0], xy[:, 1]
+    with np.errstate(invalid="ignore"):
+        bad = (x < -margin) | (x > length + margin) | (y < -margin) | (y > width + margin)
+    xy[bad] = np.nan
+    return xy, int(bad.sum())
+
+
+def reject_teleports(ball_xy, max_step=TELEPORT_DIST_PER_FRAME, min_edge=EDGE_MIN_FRAMES):
+    """Remove impossible jumps (more than `max_step` metres per elapsed frame). Returns (xy, n_removed).
+
+    The track is cut into segments at every impossible jump. A segment is an excursion, and is
+    dropped, when the track on both sides of it reconnects without it and it is no longer than
+    either neighbour: the tracker briefly followed something else and came back. Segments that
+    do not reconnect are a real relocation, such as the tracker re-locking on the ball after a
+    miss, so they are kept as separate stretches with a break at the jump (the first frame after
+    it is blanked) so that nothing later smooths or differentiates across it. A leading or
+    trailing segment shorter than `min_edge` frames next to a jump is dropped as unverifiable.
     """
-    ball_valid = np.ones(len(ball_xy), dtype=bool)
+    xy = ball_xy.copy()
+    idx = np.flatnonzero(~np.isnan(ball_xy).any(axis=1))
+    if len(idx) < 2:
+        return xy, 0
+    pts = ball_xy[idx]
+    steps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    jump = steps > max_step * np.diff(idx)
+    bounds = np.concatenate(([0], np.flatnonzero(jump) + 1, [len(idx)]))
+    kept = [np.arange(lo, hi) for lo, hi in zip(bounds[:-1], bounds[1:])]
 
-    for i in range(1, len(ball_xy)):
-        if np.isnan(ball_xy[i]).any() or np.isnan(ball_xy[i-1]).any():
-            continue
+    def reachable(a, b):
+        return np.linalg.norm(pts[b] - pts[a]) <= max_step * (idx[b] - idx[a])
 
-        dist = np.linalg.norm(ball_xy[i] - ball_xy[i-1])
-        if dist > TELEPORT_DIST_PER_FRAME:
-            ball_valid[i] = False
+    merged = []
+    for seg in kept:
+        merged.append(seg)
+        while len(merged) >= 3:
+            s0, s1, s2 = merged[-3:]
+            if len(s1) <= min(len(s0), len(s2)) and reachable(s0[-1], s2[0]):
+                merged[-3:] = [np.concatenate([s0, s2])]
+            else:
+                break
+    if len(merged) >= 2 and len(merged[0]) < min_edge:
+        merged = merged[1:]
+    if len(merged) >= 2 and len(merged[-1]) < min_edge:
+        merged = merged[:-1]
 
-    return ball_valid
-
-
-def bridge_gaps_unconditional(ball_xy, ball_valid, max_gap=12):
-    """Fill gaps <= max_gap frames by linear interpolation."""
-    result = ball_xy.copy()
-
-    for i in range(len(ball_valid)):
-        if ball_valid[i]:
-            continue
-
-        # Find nearest valid frames before and after
-        before = next((j for j in range(i - 1, -1, -1) if ball_valid[j]), None)
-        after = next((j for j in range(i + 1, len(ball_valid)) if ball_valid[j]), None)
-
-        if before is not None and after is not None:
-            gap = after - before
-            if gap <= max_gap + 1:  # +1 because gap includes both endpoints
-                t = (i - before) / gap
-                result[i] = ball_xy[before] * (1 - t) + ball_xy[after] * t
-                ball_valid[i] = True
-
-    return result, ball_valid
-
-
-def bridge_gaps_conditional(ball_xy, ball_speed, ball_valid, max_gap=50):
-    """Fill gaps <= max_gap if entry and exit velocities agree (trajectory consistent)."""
-    result = ball_xy.copy()
-
-    for i in range(len(ball_valid)):
-        if ball_valid[i]:
-            continue
-
-        before = next((j for j in range(i - 1, -1, -1) if ball_valid[j]), None)
-        after = next((j for j in range(i + 1, len(ball_valid)) if ball_valid[j]), None)
-
-        if before is not None and after is not None:
-            gap = after - before
-            if gap <= max_gap + 1:
-                # Check velocity consistency
-                v_before = np.diff(ball_xy[max(0, before - 1):before + 1], axis=0)
-                v_after = np.diff(ball_xy[after:min(len(ball_xy), after + 2)], axis=0)
-
-                if len(v_before) > 0 and len(v_after) > 0:
-                    dir_before = v_before[0] / (np.linalg.norm(v_before[0]) + 1e-6)
-                    dir_after = v_after[0] / (np.linalg.norm(v_after[0]) + 1e-6)
-
-                    angle = np.arccos(np.clip(np.dot(dir_before, dir_after), -1, 1))
-                    if angle < np.pi / 6:  # < 30 degrees
-                        t = (i - before) / gap
-                        result[i] = ball_xy[before] * (1 - t) + ball_xy[after] * t
-                        ball_valid[i] = True
-
-    return result, ball_valid
+    keep = np.zeros(len(idx), dtype=bool)
+    for seg in merged:
+        keep[seg] = True
+    xy[idx[~keep]] = np.nan
+    n_removed = int((~keep).sum())
+    for prev, cur in zip(merged[:-1], merged[1:]):
+        if idx[cur[0]] - idx[prev[-1]] == 1:
+            xy[idx[cur[0]]] = np.nan
+            n_removed += 1
+    return xy, n_removed
 
 
-def smooth_with_kalman_rts(ball_xy, ball_valid):
-    """Apply Kalman filter + RTS smoother to ball positions (offline, full sequence).
-
-    Simple 1D smoother per axis, light process/measurement noise.
+def _edge_velocity(xy, index, direction, k=VELOCITY_FRAMES):
+    """Mean velocity in metres per frame over up to `k` frames next to a gap edge, or None.
+    direction=-1: window ends at `index` (entry); direction=+1: window starts at `index` (exit).
     """
-    result = ball_xy.copy()
+    for span in range(k, 0, -1):
+        other = index + direction * span
+        if 0 <= other < len(xy) and not np.isnan(xy[other]).any():
+            delta = xy[index] - xy[other] if direction < 0 else xy[other] - xy[index]
+            return delta / span
+    return None
 
-    # Fill NaN with forward-fill for filtering
-    for axis in range(2):
-        col = result[:, axis]
-        mask_valid = ~np.isnan(col)
-        if not mask_valid.any():
+
+def _velocities_agree(v_in, v_out):
+    """Entry and exit velocities describe one continuous trajectory: same direction, similar speed."""
+    if v_in is None or v_out is None:
+        return False
+    s_in, s_out = np.linalg.norm(v_in), np.linalg.norm(v_out)
+    if s_in < STATIONARY_STEP and s_out < STATIONARY_STEP:
+        return True  # the ball sat still on both sides of the gap
+    if s_in < STATIONARY_STEP or s_out < STATIONARY_STEP:
+        return False
+    cos = np.clip(np.dot(v_in, v_out) / (s_in * s_out), -1.0, 1.0)
+    if np.degrees(np.arccos(cos)) > VELOCITY_ANGLE_DEG:
+        return False
+    return 1.0 / VELOCITY_SPEED_RATIO <= s_out / s_in <= VELOCITY_SPEED_RATIO
+
+
+def bridge_gaps(ball_xy, max_unconditional=GAP_BRIDGE_UNCONDITIONAL,
+                max_conditional=GAP_BRIDGE_CONDITIONAL):
+    """Linear interpolation across short interior gaps. Returns (xy, n_unconditional, n_conditional)
+    counted in frames.
+
+    Gaps up to `max_unconditional` frames are always bridged. Gaps up to `max_conditional` are
+    bridged only when the velocity entering the gap agrees with the one leaving it. Either way the
+    implied speed must stay under the teleport limit. Gaps at the very start or end are left alone.
+    """
+    xy = ball_xy.copy()
+    n_uncond = n_cond = 0
+    for start, stop in _runs(np.isnan(ball_xy).any(axis=1)):
+        length = stop - start
+        if start == 0 or stop >= len(xy) or length > max_conditional:
             continue
+        before, after = start - 1, stop
+        if np.linalg.norm(xy[after] - xy[before]) > TELEPORT_DIST_PER_FRAME * (length + 1):
+            continue
+        if length > max_unconditional:
+            v_in = _edge_velocity(xy, before, -1)
+            v_out = _edge_velocity(xy, after, +1)
+            if not _velocities_agree(v_in, v_out):
+                continue
+            n_cond += length
+        else:
+            n_uncond += length
+        t = (np.arange(start, stop) - before) / (after - before)
+        xy[start:stop] = xy[before] + t[:, None] * (xy[after] - xy[before])
+    return xy, n_uncond, n_cond
 
-        # Simple smoothing: Butterworth filter on valid frames
-        x = col[mask_valid]
-        if len(x) > 5:
-            sos = signal.butter(2, 0.1, output='sos')
-            x_smooth = signal.sosfiltfilt(sos, x)
-            col[mask_valid] = x_smooth
 
-        result[:, axis] = col
+def smooth_runs(ball_xy, cutoff=SMOOTH_CUTOFF, min_len=SMOOTH_MIN_RUN):
+    """Zero-phase 2nd-order Butterworth low-pass, applied separately to each contiguous run of
+    observed frames so nothing is smoothed across a gap. Runs shorter than `min_len` are kept raw.
+    """
+    sos = signal.butter(2, cutoff, output="sos")
+    xy = ball_xy.copy()
+    for start, stop in _runs(~np.isnan(ball_xy).any(axis=1)):
+        if stop - start >= min_len:
+            for axis in range(2):
+                xy[start:stop, axis] = signal.sosfiltfilt(sos, ball_xy[start:stop, axis])
+    return xy
 
-    return result
+
+def ball_speed_from_positions(ball_xy, fps=FPS):
+    """Ball speed in m/s from consecutive cleaned positions. NaN where either frame is missing."""
+    speed = np.full(len(ball_xy), np.nan)
+    step = np.linalg.norm(np.diff(ball_xy, axis=0), axis=1)
+    speed[1:] = step * fps
+    return speed
+
+
+def clean_ball(ball_xy, pitch):
+    """Full ball cleaning. Returns (xy, stats) where xy is NaN wherever the ball is not trusted."""
+    xy, n_oob = reject_out_of_pitch(ball_xy, pitch)
+    xy, n_tele = reject_teleports(xy)
+    xy, n_uncond, n_cond = bridge_gaps(xy)
+    xy = smooth_runs(xy)
+    stats = {"out_of_pitch": n_oob, "teleports": n_tele,
+             "bridged_short": n_uncond, "bridged_long": n_cond}
+    return xy, stats
 
 
 def compute_team_features(ball_xy, player_xy, player_team, radius=1.5):
@@ -263,15 +336,14 @@ def main(game=GAME, data_dir=None):
     pitch = GAMES[game]["pitch"]
 
     print("Loading {}".format(os.path.basename(raw_path)))
-    ball_xy, ball_speed, ball_valid, player_xy, player_team = ingest_raw(
+    ball_xy_raw, ball_speed_raw, ball_observed, player_xy, player_team = ingest_raw(
         raw_path, team_of_each_track(meta_path), n_frames, pitch
     )
 
-    print("Cleaning ball (teleports, gaps, smoothing)")
-    ball_valid &= clean_ball_teleports(ball_xy, ball_speed)
-    ball_xy, ball_valid = bridge_gaps_unconditional(ball_xy, ball_valid, GAP_BRIDGE_UNCONDITIONAL)
-    ball_xy, ball_valid = bridge_gaps_conditional(ball_xy, ball_speed, ball_valid, GAP_BRIDGE_CONDITIONAL)
-    ball_xy = smooth_with_kalman_rts(ball_xy, ball_valid)
+    print("Cleaning ball (out-of-pitch, teleports, gaps, smoothing)")
+    ball_xy, clean_stats = clean_ball(ball_xy_raw, pitch)
+    ball_valid = ~np.isnan(ball_xy).any(axis=1)
+    ball_speed = ball_speed_from_positions(ball_xy)
 
     print("Computing team features")
     team_features = compute_team_features(ball_xy, player_xy, player_team)
@@ -280,15 +352,22 @@ def main(game=GAME, data_dir=None):
         'n_frames': n_frames,
         'pitch': pitch,
         'ball_xy': ball_xy,
-        'ball_speed': ball_speed,
+        'ball_speed': ball_speed,        # m/s, from the cleaned positions
+        'ball_speed_raw': ball_speed_raw,  # the ATD's own speed field, uncleaned
         'ball_valid': ball_valid,
         'player_xy': player_xy,
         'player_team': player_team,
+        'clean_stats': clean_stats,
         **team_features,
     }
 
-    print("  ball observed: {} / {} frames ({:.1f}%)".format(
-        np.sum(ball_valid), n_frames, 100.0 * np.sum(ball_valid) / n_frames))
+    print("  ball in raw ATD: {} / {} frames ({:.1f}%)".format(
+        int(ball_observed.sum()), n_frames, 100.0 * ball_observed.sum() / n_frames))
+    print("  rejected: {} out of pitch, {} teleports; bridged: {} short-gap, {} long-gap frames".format(
+        clean_stats["out_of_pitch"], clean_stats["teleports"],
+        clean_stats["bridged_short"], clean_stats["bridged_long"]))
+    print("  ball usable after cleaning: {} / {} frames ({:.1f}%)".format(
+        int(ball_valid.sum()), n_frames, 100.0 * ball_valid.sum() / n_frames))
     print("  H centroid: {:.1f}, {:.1f}".format(
         np.nanmean(result['centroid_H'][:, 0]),
         np.nanmean(result['centroid_H'][:, 1])))

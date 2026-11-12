@@ -27,6 +27,8 @@ TOUCH_IMPULSE = 4.0             # m/s, |v_after - v_before| (kick, trap, block)
 TOUCH_DIRECTION_THRESHOLD = 30  # degrees
 TOUCH_DIRECTION_MIN_SPEED = 3.0 # m/s
 TOUCH_NMS = 3                   # frames, keep one touch per local impulse peak
+VEL_WINDOW_SHORT = 3            # frames, fallback where the ball is not seen VEL_WINDOW away
+TOUCH_TIE_MARGIN = 0.5          # m, nearest H and A within this of each other: credit both
 CONTROL_PERSISTENCE_K = 5       # frames (0.2 s)
 CONTROL_GAP_CLOSE = 2           # frames of dropout tolerated inside a control run
 CONTROL_MAX_BALL_SPEED = 10.0   # m/s, faster than this the ball is travelling, not carried
@@ -37,6 +39,11 @@ BALL_LIVE_SPEED = 3.0           # m/s, moving ball inside the pitch -> evidence 
 OOB_MARGIN = 0.5                # m beyond pitch bounds
 BOUNDARY_NEAR = 2.0             # m from a pitch line
 MISSING_BALL_AT_BOUNDARY_GAP = 50  # frames
+MISSING_STALE_FRAMES = 750      # 30 s: restarts come well within this, so after it the last
+                                # sighting of the ball says nothing about whether it is dead
+TAKER_RADIUS = 3.0              # m, a throw-in taker holds the ball, a kick taker stands over it
+TAKER_SEARCH = 50               # frames after the stoppage in which the ball must reappear
+KICKOFF_SPOT_RADIUS = 3.0       # m around the centre spot
 RESTART_PAD = 10                # frames each side of a localised restart frame
 SMART_TAG_DEAD_SHORT = 0.8      # prior on short restart tags (kickoffs, ~5 s)
 SMART_TAG_DEAD_LONG = 0.6       # most SET PIECES tags are a fixed 875-frame (35 s) window
@@ -117,11 +124,17 @@ def detect_touches(ball_xy: np.ndarray, nearest: np.ndarray,
 
     Ball event at f if |v_after - v_before| > impulse_threshold (kick / trap / block), OR
     direction turns by > direction_threshold deg while speed > TOUCH_DIRECTION_MIN_SPEED.
-    Events are thinned to local impulse peaks (+-TOUCH_NMS), then attributed to every team
-    with a player within min_player_dist (tolerating +-1 frame). NaN ball -> no touch.
+    Velocities use VEL_WINDOW frames each side, or VEL_WINDOW_SHORT where the ball is not seen
+    that far away (next to a gap). Events are thinned to local impulse peaks (+-TOUCH_NMS), then
+    credited to the team whose nearest player is within min_player_dist and closer than the
+    opponent's (tolerating +-1 frame), or to both when the two are within TOUCH_TIE_MARGIN.
+    NaN ball -> no touch.
     """
     n = len(ball_xy)
     vb, va = ball_velocity(ball_xy)
+    vb_s, va_s = ball_velocity(ball_xy, VEL_WINDOW_SHORT)
+    vb = np.where(np.isnan(vb), vb_s, vb)
+    va = np.where(np.isnan(va), va_s, va)
     impulse = np.linalg.norm(va - vb, axis=1)
     sb, sa = np.linalg.norm(vb, axis=1), np.linalg.norm(va, axis=1)
     with np.errstate(invalid="ignore"):
@@ -141,8 +154,11 @@ def detect_touches(ball_xy: np.ndarray, nearest: np.ndarray,
     nd_tol = nd.copy()
     nd_tol[1:] = np.minimum(nd_tol[1:], nd[:-1])
     nd_tol[:-1] = np.minimum(nd_tol[:-1], nd[1:])
-    touch_H = event & (nd_tol[:, HOME] <= min_player_dist)
-    touch_A = event & (nd_tol[:, AWAY] <= min_player_dist)
+    dH, dA = nd_tol[:, HOME], nd_tol[:, AWAY]
+    with np.errstate(invalid="ignore"):
+        tie = np.abs(dH - dA) <= TOUCH_TIE_MARGIN
+    touch_H = event & (dH <= min_player_dist) & ((dH < dA) | tie)
+    touch_A = event & (dA <= min_player_dist) & ((dA < dH) | tie)
     return touch_H, touch_A
 
 
@@ -186,6 +202,7 @@ def detect_dead_ball(ball_xy: np.ndarray, speed: np.ndarray, player_xy: np.ndarr
     0.8  ball stationary (< BALL_STATIONARY m/s for >= STATIONARY_MIN_FRAMES) and players slow
     0.7  ball missing > MISSING_BALL_AT_BOUNDARY_GAP frames after last seen within BOUNDARY_NEAR
          of a line
+         (0.9 and 0.7 expire after MISSING_STALE_FRAMES of missing ball and fall back to 0.5)
     0.3  ball moving > BALL_LIVE_SPEED inside the pitch (evidence of live play)
     0.5  otherwise (unknown)
     """
@@ -223,9 +240,11 @@ def detect_dead_ball(ball_xy: np.ndarray, speed: np.ndarray, player_xy: np.ndarr
     miss = ~present & (last >= 0)
     gap_len = np.arange(n) - last
     lv = last[miss]
+    gl = gap_len[miss]
+    fresh = gl <= MISSING_STALE_FRAMES
     p_miss = np.full(miss.sum(), 0.5)
-    p_miss[near_line[lv] & (gap_len[miss] > MISSING_BALL_AT_BOUNDARY_GAP)] = 0.7
-    p_miss[oob[lv]] = 0.9
+    p_miss[near_line[lv] & (gl > MISSING_BALL_AT_BOUNDARY_GAP) & fresh] = 0.7
+    p_miss[oob[lv] & fresh] = 0.9
     p[miss] = p_miss
 
     p[oob] = 1.0
@@ -272,11 +291,18 @@ def load_smart_tagging_phases(smart_tagging: list, n_frames: int,
     return smart_tag_team, smart_tag_dead
 
 
-def localise_restart(s: int, e: int, dead_ball, touch_H, touch_A, team=None):
-    """(frame, team) of the restart inside a tag window [s,e).
+def localise_restart(s: int, e: int, dead_ball, touch_H, touch_A, team=None,
+                     nearest=None, ball_xy=None, centre=None):
+    """(frame, team) of the restart inside a tag window [s,e), or (None, -1).
 
-    Restart = first touch after the last dead stretch (dead_ball >= 0.7) in the window; if there
-    is no dead stretch, the first touch (by `team` when known). Returns (None, -1) if no touch.
+    In order:
+    1. The first touch after the last dead stretch (dead_ball >= 0.7) in the window, by `team`
+       when it is known.
+    2. Team known and the window has a dead stretch: the frame the ball leaves it.
+    3. Team unknown: whoever has a player within TAKER_RADIUS of the ball on its first visible
+       frame after the stoppage (the taker holds or stands over the ball).
+    4. Team known and `centre` given (kickoff): the frame the ball leaves the centre spot,
+       otherwise the middle of the window (short kickoff tags bracket the restart).
     """
     dead = dead_ball[s:e] >= 0.7
     after = s + (int(np.flatnonzero(dead)[-1]) + 1 if dead.any() else 0)
@@ -287,17 +313,35 @@ def localise_restart(s: int, e: int, dead_ball, touch_H, touch_A, team=None):
             return f, team
     if dead.any() and team is not None:
         return after, team        # ball left the dead stretch; no clean touch seen
+    if team is None and nearest is not None:
+        for f in range(after, min(e, after + TAKER_SEARCH)):
+            d = nearest[f]
+            if np.isnan(d).all():
+                continue
+            d = np.where(np.isnan(d), np.inf, d)
+            if d.min() <= TAKER_RADIUS and d[HOME] != d[AWAY]:
+                return f, (HOME if d[HOME] < d[AWAY] else AWAY)
+            break
+    if team is not None and centre is not None:
+        if ball_xy is not None:
+            near = np.linalg.norm(ball_xy[s:e] - np.asarray(centre), axis=1) <= KICKOFF_SPOT_RADIUS
+            runs = _runs(near)
+            if runs:
+                return s + int(runs[0][1]) - 1, team
+        return (s + e) // 2, team
     return None, -1
 
 
 def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: int,
-                       dead_ball, touch_H, touch_A) -> Tuple[np.ndarray, Dict[str, int]]:
+                       dead_ball, touch_H, touch_A, nearest=None, ball_xy=None,
+                       pitch=None) -> Tuple[np.ndarray, Dict[str, int]]:
     """restart_team int8[N]: who takes each restart, on +-RESTART_PAD frames around it.
 
     - Kick Off (Start): published kickoff frames and owners (KICKOFFS).
     - Corner / goal kick / free kick: Team tag = team performing the set piece.
     - Kick Off (After Goal): team that conceded = opposite of the preceding GOALS tag.
-    - Throw-ins (Team 'N/A'): team of the first touch after the dead stretch, from tracking.
+    - Throw-ins (Team 'N/A'): team of the first touch after the dead stretch, else the team
+      standing at the ball when it reappears, from tracking.
     The restart frame inside each (mostly 35 s) tag window is localised from tracking.
     """
     restart = np.full(n_frames, -1, dtype=np.int8)
@@ -324,7 +368,9 @@ def infer_restart_team(smart_tagging: list, team_map: Dict[str, int], n_frames: 
         if team is None and 'after goal' in typ:
             prev = [t for g, t in goals if g <= s and t is not None]
             team, src = ((1 - prev[-1]), "after_goal") if prev else (None, src)
-        f, found = localise_restart(s, e, dead_ball, touch_H, touch_A, team)
+        centre = (pitch[0] / 2, pitch[1] / 2) if pitch is not None and 'kick off' in typ else None
+        f, found = localise_restart(s, e, dead_ball, touch_H, touch_A, team,
+                                    nearest=nearest, ball_xy=ball_xy, centre=centre)
         if f is None:
             stats["unlocated"] += 1
             continue
@@ -370,7 +416,8 @@ def main(game: str = GAME, data_dir: str = None, m1_data: dict = None) -> Dict[s
     print("M2: Smart Tagging signals + restart owner")
     smart_tag_team, smart_tag_dead = load_smart_tagging_phases(smart_tagging, n_frames, team_map)
     restart_team, rstats = infer_restart_team(smart_tagging, team_map, n_frames,
-                                              dead_ball, touch_H, touch_A)
+                                              dead_ball, touch_H, touch_A,
+                                              nearest=nearest, ball_xy=ball_xy, pitch=pitch)
 
     evidence = {
         'ball_xy': ball_xy,
