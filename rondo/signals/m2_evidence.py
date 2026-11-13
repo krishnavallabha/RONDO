@@ -41,6 +41,10 @@ BOUNDARY_NEAR = 2.0             # m from a pitch line
 MISSING_BALL_AT_BOUNDARY_GAP = 50  # frames
 MISSING_STALE_FRAMES = 750      # 30 s: restarts come well within this, so after it the last
                                 # sighting of the ball says nothing about whether it is dead
+MISSING_SLOW_PLAYERS = 1.1      # m/s, mean player speed (1 s smoothed) below which a missing
+MISSING_SLOW_LEVEL = 0.7        #   ball counts as a stoppage at this level. Chosen on the
+                                #   Metrica harness matches, confirmed on IDSSE (Nov 13).
+PLAYER_SPEED_SMOOTH = 25        # frames, centred window for the mean player speed
 TAKER_RADIUS = 3.0              # m, a throw-in taker holds the ball, a kick taker stands over it
 TAKER_SEARCH = 50               # frames after the stoppage in which the ball must reappear
 KICKOFF_SPOT_RADIUS = 3.0       # m around the centre spot
@@ -239,6 +243,20 @@ def detect_duel_zone(nearest: np.ndarray, radius: float = CONTROL_RADIUS) -> np.
     return (nd[:, HOME] <= radius) & (nd[:, AWAY] <= radius)
 
 
+def _smooth_nan(raw: np.ndarray, window: int) -> np.ndarray:
+    """NaN-aware centred moving average; frames that were NaN stay NaN."""
+    ok = np.isfinite(raw)
+    csum = np.concatenate(([0.0], np.cumsum(np.where(ok, raw, 0.0))))
+    ccnt = np.concatenate(([0], np.cumsum(ok)))
+    n, half = len(raw), window // 2
+    lo = np.clip(np.arange(n) - half, 0, n)
+    hi = np.clip(np.arange(n) + half + 1, 0, n)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = (csum[hi] - csum[lo]) / (ccnt[hi] - ccnt[lo])
+    out[~ok] = np.nan
+    return out
+
+
 def detect_dead_ball(ball_xy: np.ndarray, speed: np.ndarray, player_xy: np.ndarray,
                      pitch: Tuple[float, float]) -> np.ndarray:
     """Soft probability that the ball is dead, float [N] in [0,1].
@@ -249,6 +267,7 @@ def detect_dead_ball(ball_xy: np.ndarray, speed: np.ndarray, player_xy: np.ndarr
     0.7  ball missing > MISSING_BALL_AT_BOUNDARY_GAP frames after last seen within BOUNDARY_NEAR
          of a line
          (0.9 and 0.7 expire after MISSING_STALE_FRAMES of missing ball and fall back to 0.5)
+    0.7  ball missing, still unknown, and players slower than MISSING_SLOW_PLAYERS (a stoppage)
     0.3  ball moving > BALL_LIVE_SPEED inside the pitch (evidence of live play)
     0.5  otherwise (unknown)
     """
@@ -292,6 +311,13 @@ def detect_dead_ball(ball_xy: np.ndarray, speed: np.ndarray, player_xy: np.ndarr
     p_miss[near_line[lv] & (gl > MISSING_BALL_AT_BOUNDARY_GAP) & fresh] = 0.7
     p_miss[oob[lv] & fresh] = 0.9
     p[miss] = p_miss
+
+    # Missing ball + slow players: a stoppage. On this match the ball goes missing mostly in
+    # long stretches with players at about half their in-play speed, as in Metrica's own
+    # tracking (ball missing on 78% of dead frames, 13% of alive ones). Only frames still
+    # unknown are raised, so the line/out-of-bounds levels above keep priority.
+    slow = _smooth_nan(pmean, PLAYER_SPEED_SMOOTH) < MISSING_SLOW_PLAYERS
+    p[~present & (p == 0.5) & slow] = MISSING_SLOW_LEVEL
 
     p[oob] = 1.0
     return p

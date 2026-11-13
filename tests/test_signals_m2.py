@@ -69,6 +69,19 @@ class DeadBallTest(unittest.TestCase):
         self.assertTrue(np.all(p[110 + m2.MISSING_STALE_FRAMES:] == 0.5))
         self.assertTrue(np.all((p >= 0) & (p <= 1)))
 
+    def test_missing_ball_with_slow_players_is_a_stoppage(self):
+        n = 400
+        xy = np.full((n, 2), np.nan)
+        xy[:50] = np.column_stack([30.0 + 0.2 * np.arange(50), np.full(50, 30.0)])  # mid-pitch
+        players = np.zeros((n, 22, 2))
+        players[:, :, 1] = np.arange(22)[None, :] * 3.0
+        step = np.where(np.arange(n) < 200, 0.12, 0.02)  # 3 m/s, then 0.5 m/s from frame 200
+        players[:, :, 0] = 20.0 + np.cumsum(step)[:, None]
+        p = m2.detect_dead_ball(xy, m2.ball_speed_mps(xy), players, PITCH)
+        self.assertTrue(np.all(p[60:180] == 0.5))                    # missing, players running
+        self.assertTrue(np.all(p[230:] == m2.MISSING_SLOW_LEVEL))    # missing, players walking
+        self.assertFalse(np.any(p[:50] == m2.MISSING_SLOW_LEVEL))    # ball seen: rule not used
+
 
 def teams_frame(n, spread_home, spread_away, players=11):
     """Two teams of `players` on a circle of the given radius, the same on every frame."""
