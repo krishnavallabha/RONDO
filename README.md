@@ -198,7 +198,8 @@ Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](d
 - [x] **Nov 12** Signals M0 (no Metrica possession channel in the export), M1 ingest + ball cleaning, M2 evidence; real `evidence.npz` passes `contract.check` and decodes to a CSV the official validator accepts
 - [x] **Nov 12** Harness: IDSSE + Metrica sample downloaded and pinned, converted to H/A/D labels, official scorer wired to external matches with a bootstrap results sheet ([docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md))
 - [ ] **Nov 12** Lock the M2 → M3 contract with the whole team
-- [ ] **Nov 13** Full HMM with minimum durations + restart logic; **first valid upload**
+- [x] **Nov 13** Full HMM with minimum durations + restart logic; first real-match CSV passes the validator. Held-out IDSSE spellF1 0.37 (corrupted ball) / 0.48 (stoppages hidden) / 0.51 (full ball), above the 0.2433 floor
+- [ ] **Nov 13** First valid upload (Google Form)
 - [ ] **Nov 14** Boundary snapping + expected-F1 decoding; core pipeline frozen
 - [ ] **Nov 15** Add-ons (M4–M7), each kept only if it beats bootstrap noise
 - [ ] **Nov 16** Technical document, clean-clone reproduction, final upload

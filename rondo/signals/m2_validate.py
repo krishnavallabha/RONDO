@@ -27,6 +27,7 @@ import numpy as np
 from rondo import decoder
 from rondo.harness import datasets, labels, score
 from rondo.signals import external
+from rondo.signals.export import to_contract
 from rondo.signals.m2_evidence import AWAY, HOME, build_evidence, team_spread_ratio
 
 EPS = 1e-6
@@ -205,9 +206,10 @@ VARIANTS = {
     "gate70": {"gate": 0.7},
     "gate80": {"gate": 0.8},
     "gate100": {"gate": 1.0},
-    # The decoder change proposed to B (Nov 13): no-evidence frames stop leaning dead, plus two
-    # transition/emission settings, chosen on Metrica across corruptions, confirmed on IDSSE.
-    "decoder_fix": {"dead_prior": True, "params": {"p_to_dead": 0.004, "touch_weight": 0.2}},
+    # decoder_fix (dead_ball remap, p_to_dead 0.004, touch_weight 0.2) is in decoder.DEFAULTS
+    # since Nov 13. Ablations of the Nov 13 decoder additions against that base:
+    "no_min_duration": {"params": {"min_alive": 1, "min_dead": 1}},
+    "no_restart": {"params": {"restart_weight": 0.0}},
 }
 LEAD_OF = ("shape_c", "mark_c")
 
@@ -279,12 +281,10 @@ def decode_match(ev, half, delta=None, params=decoder.DEFAULTS):
     loglik = decoder.emission_loglik(ev, params)
     if delta is not None:
         loglik = shift_share(loglik, delta)
-    log_trans = decoder.log_transitions(params)
-    log_init = np.log([EPS, EPS, 1.0])
     for number in sorted(set(half.tolist()) - {0}):
         rows = np.flatnonzero(half == number)
         start, stop = int(rows.min()), int(rows.max()) + 1
-        codes[start:stop] = decoder.viterbi(loglik[start:stop], log_trans, log_init)
+        codes[start:stop] = decoder.decode_half(loglik[start:stop], params)
     return codes
 
 
@@ -426,19 +426,6 @@ CORRUPTIONS = {"corrupt": _corrupt, "occl50": _occl50, "low8": _low8, "deadmiss"
                "full": lambda truth, meta, player_xy, real: truth["ball_xy"].copy()}
 
 
-def dead_prior(ev):
-    """dead_ball remapped so 0.5 ("no idea") gives D, H and A equal emission weight.
-
-    B's emission scores D at p and H, A at (1 - p) * share. With p = 0.5 and share = 0.5 that is
-    0.5 against 0.25 each, so every frame without evidence leans dead. p' = p / (p + 2 (1 - p))
-    sends 0.5 to 1/3, keeps 0 and 1 fixed and keeps the order of every other level.
-    """
-    out = dict(ev)
-    p = np.asarray(ev["dead_ball"], dtype=float)
-    out["dead_ball"] = p / (p + 2.0 * (1.0 - p))
-    return out
-
-
 def prepare_matches(real, selection=None, conditions=("corrupt", "full")):
     """[(dataset, match, gt, half, feats, {condition: evidence})] for the selected matches.
 
@@ -458,7 +445,9 @@ def prepare_matches(real, selection=None, conditions=("corrupt", "full")):
         evs = {}
         for condition in conditions:
             ball = CORRUPTIONS[condition](truth, meta, player_xy, real)
-            evs[condition], _ = build_evidence(ball, player_xy, player_team, tuple(meta["pitch"]))
+            # to_contract: unknown teams as NaN, as the decoder reads them in the real pipeline
+            evs[condition] = to_contract(
+                build_evidence(ball, player_xy, player_team, tuple(meta["pitch"]))[0])
         out.append((dataset, match_id, gt, truth["half"], feats, evs))
     return out
 
@@ -476,8 +465,6 @@ def run(specs, prepared, real, scale=1.0, bootstrap=0, log=print):
                 used = gate_control(ev, spec["gate"]) if spec.get("gate") is not None else ev
                 if spec.get("slow_dead"):
                     used = slow_dead(used, feats["pspeed"], **spec["slow_dead"])
-                if spec.get("dead_prior"):
-                    used = dead_prior(used)
                 w = weights[name]
                 params = dict(decoder.DEFAULTS, **spec.get("params", {}))
                 pred = decode_match(used, half, log_odds(feats, w) if w else None, params)

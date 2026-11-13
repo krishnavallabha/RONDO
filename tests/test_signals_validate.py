@@ -78,7 +78,7 @@ class FitAndDecodeTests(unittest.TestCase):
         n = 300
         ev = {"dead_ball": np.full(n, 0.05), "control_H": np.zeros(n, bool),
               "control_A": np.zeros(n, bool), "touch_H": np.zeros(n, bool),
-              "touch_A": np.zeros(n, bool)}
+              "touch_A": np.zeros(n, bool), "restart_team": np.full(n, np.nan)}
         ev["control_H"][:140] = True
         ev["control_A"][160:] = True
         half = np.array([1] * 140 + [0] * 20 + [2] * 140, dtype=np.int8)
@@ -99,20 +99,17 @@ class FitAndDecodeTests(unittest.TestCase):
 
 class CorruptionAndPriorTests(unittest.TestCase):
 
-    def test_dead_prior_makes_unknown_uninformative_and_keeps_order(self):
-        levels = np.array([0.0, 0.3, 0.5, 0.7, 0.8, 0.9, 1.0])
-        out = mv.dead_prior({"dead_ball": levels})["dead_ball"]
-        self.assertAlmostEqual(out[2], 1 / 3)
-        self.assertEqual(out[0], 0.0)
-        self.assertEqual(out[-1], 1.0)
-        self.assertTrue((np.diff(out) > 0).all())
-        # With no control evidence the three states now tie at 1/3 each.
-        ev = {"dead_ball": np.array([0.5]), "control_H": np.zeros(1, bool),
-              "control_A": np.zeros(1, bool), "touch_H": np.zeros(1, bool),
-              "touch_A": np.zeros(1, bool)}
+    def test_unknown_dead_ball_is_uninformative_and_order_kept(self):
+        # The dead_ball remap now lives in the decoder's emission (Nov 13).
         from rondo import decoder
-        np.testing.assert_allclose(np.exp(decoder.emission_loglik(mv.dead_prior(ev)))[0],
-                                   [1 / 3] * 3, rtol=1e-5)
+        levels = np.array([0.0, 0.3, 0.5, 0.7, 0.8, 0.9, 1.0])
+        n = len(levels)
+        ev = {"dead_ball": levels, "control_H": np.zeros(n, bool), "control_A": np.zeros(n, bool),
+              "touch_H": np.zeros(n, bool), "touch_A": np.zeros(n, bool),
+              "restart_team": np.full(n, np.nan)}
+        p_dead = np.exp(decoder.emission_loglik(ev))[:, decoder.D]
+        np.testing.assert_allclose(np.exp(decoder.emission_loglik(ev))[2], [1 / 3] * 3, rtol=1e-5)
+        self.assertTrue((np.diff(p_dead) > 0).all())
 
     def test_subsample_interpolates_between_kept_frames_and_keeps_gaps(self):
         ball = np.column_stack([np.arange(10.0) ** 2, np.zeros(10)])
