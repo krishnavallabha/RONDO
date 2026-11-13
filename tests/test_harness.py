@@ -13,7 +13,7 @@ import numpy as np
 
 import rondo  # noqa: F401  (puts the challenge repo on sys.path)
 import possession_metrics as pm
-from rondo.harness import datasets, idsse, labels, metrica, score
+from rondo.harness import datasets, idsse, labels, metrica, noise, score
 
 HOME_ID, AWAY_ID = "DFL-CLU-HOME", "DFL-CLU-AWAY"
 
@@ -276,6 +276,116 @@ class ScoreTest(unittest.TestCase):
         self.assertEqual(len(lagged), len(gt))
         self.assertEqual(row["n_pred_spells"], row["n_gt_spells"])
         self.assertEqual(row["boundary_median_frames"], 25.0)
+
+
+class NoiseTest(unittest.TestCase):
+    """The corruption model. Everything here is synthetic: no data, no network."""
+
+    @staticmethod
+    def track(n, gap=200, seen=300):
+        """A clean straight ball track with regular gaps -- a profile with known statistics."""
+        xy = np.stack([np.linspace(0, 105, n), np.full(n, 34.0)], axis=1)
+        missing = np.zeros(n, dtype=bool)
+        for start in range(seen, n, seen + gap):
+            missing[start:start + gap] = True
+        xy[missing] = np.nan
+        return xy, missing
+
+    def test_measure_reads_rate_gaps_and_jitter(self):
+        xy, missing = self.track(10000)
+        profile = noise.measure(xy)
+        self.assertAlmostEqual(profile["missing_rate"], missing.mean(), places=6)
+        self.assertEqual(profile["median_gap_frames"], 200.0)
+        self.assertEqual(profile["max_gap_frames"], 200)
+        self.assertEqual(profile["long_gap_share_of_missing"], 0.0)  # 200 frames = 8 s < 10 s
+        # A straight track with no noise: jitter must read as zero, not as its curvature.
+        self.assertLess(max(profile["jitter_m"]), 1e-9)
+
+    def test_measure_finds_injected_jitter(self):
+        n = 40000
+        rng = np.random.default_rng(0)
+        xy = np.stack([np.linspace(0, 105, n), np.full(n, 34.0)], axis=1)
+        xy[:, 0] += rng.normal(0, 0.05, n)
+        profile = noise.measure(xy)
+        self.assertAlmostEqual(profile["jitter_m"][0], 0.05, places=2)
+        self.assertLess(profile["jitter_m"][1], 1e-9)
+
+    def test_apply_reproduces_the_profile_it_was_given(self):
+        profile = noise.load("metrica_native")
+        clean = np.zeros((400000, 2))
+        got = noise.measure(noise.apply(clean, profile, seed=0))
+        # Rate and the share of missing frames in long gaps are what the decoder feels; both
+        # within a couple of points over a long track.
+        self.assertAlmostEqual(got["missing_rate"], profile["missing_rate"], delta=0.005)
+        self.assertAlmostEqual(got["long_gap_share_of_missing"],
+                               profile["long_gap_share_of_missing"], delta=0.05)
+
+    def test_gaps_are_stretches_not_a_per_frame_coin_flip(self):
+        # The failure mode this guards: a Bernoulli mask with the right rate is thousands of
+        # one-frame holes, which M1 bridges trivially and which this match does not have.
+        profile = noise.load("metrica_native")
+        got = noise.measure(noise.apply(np.zeros((200000, 2)), profile, seed=3))
+        self.assertGreater(got["median_gap_frames"], 20)
+        self.assertLess(got["n_gaps"], 500)
+
+    def test_apply_is_seeded_and_keeps_existing_holes(self):
+        profile = noise.load("metrica_native")
+        clean = np.zeros((50000, 2))
+        clean[:100] = np.nan  # already missing in the source match
+        first = noise.apply(clean, profile, seed=7)
+        self.assertTrue(np.array_equal(np.isnan(first), np.isnan(noise.apply(clean, profile, 7))))
+        self.assertFalse(np.array_equal(np.isnan(first),
+                                        np.isnan(noise.apply(clean, profile, 8))))
+        self.assertTrue(np.isnan(first[:100, 0]).all())
+
+    def test_profile_round_trips_through_json(self):
+        xy, _ = self.track(5000)
+        profile = noise.measure(xy, source="test")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "p.json")
+            noise.save(profile, path)
+            self.assertEqual(noise.load(path), profile)
+
+    def test_committed_profile_has_what_apply_needs(self):
+        profile = noise.load("metrica_native")
+        for key in ("missing_rate", "gap_percentiles", "seen_percentiles", "jitter_m", "note"):
+            self.assertIn(key, profile)
+        self.assertEqual(len(profile["gap_percentiles"]), len(noise.PERCENTILES))
+        self.assertGreater(profile["missing_rate"], 0.3)  # this match loses the ball on ~41%
+
+    def test_missing_profile_says_how_to_make_one(self):
+        with self.assertRaisesRegex(IOError, "rondo.harness noise"):
+            noise.load(os.path.join("profiles", "not_measured_yet.json"))
+
+
+class RunTest(unittest.TestCase):
+    def test_decode_commits_inside_halves_and_abstains_outside(self):
+        from rondo.harness import run as harness_run
+        from rondo import contract
+        n = 600
+        half = np.zeros(n, dtype=np.int8)
+        half[100:300] = 1
+        half[400:600] = 2
+        ev = contract.empty(n)
+        ev["control_H"][100:300] = True
+        ev["control_A"][400:600] = True
+        codes = harness_run.decode(ev, half)
+        self.assertTrue((codes[:100] == labels.X).all())
+        self.assertTrue((codes[300:400] == labels.X).all())
+        self.assertTrue((codes[100:300] == labels.H).all())
+        self.assertTrue((codes[400:600] == labels.A).all())
+
+    def test_report_states_whether_the_target_is_beaten(self):
+        from rondo.harness import run as harness_run
+        lines = []
+        rows = [{"experiment": "harness_x", "dataset": "idsse", "match": "M",
+                 "spell_f1_mean": 0.30},
+                {"experiment": "harness_x", "dataset": "idsse", "match": "N",
+                 "spell_f1_mean": 0.40}]
+        harness_run.report(rows, target=0.2433, log=lines.append)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("ABOVE", lines[0])
+        self.assertIn("0.3500", lines[0])  # the mean, not the best match
 
 
 if __name__ == "__main__":

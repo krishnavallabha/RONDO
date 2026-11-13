@@ -58,7 +58,7 @@ def load(dataset, match_id, external_dir=None):
     return labels.read(folder), truth, labels.read_meta(folder)
 
 
-def available(external_dir=None, log=None):
+def available(external_dir=None):
     """[(dataset, match)] whose source files are downloaded -- what the harness can score now."""
     return [(dataset, match_id) for dataset, match_id in datasets.every_match()
             if datasets.have(dataset, match_id,
@@ -132,8 +132,9 @@ def score(experiment, predict, matches=None, bootstrap_n=0, external_dir=None, s
         gt_codes, truth, meta = load(dataset, match_id, external_dir)
         pred = np.asarray(predict(truth, meta, gt_codes), dtype=np.int8)
         rows.append(row(experiment, dataset, match_id, gt_codes, pred, bootstrap_n, notes))
-        log("{:<22} {:<8} {:<14} spellF1 {:.4f}  macroF1 {:.4f}".format(
-            experiment, dataset, match_id, rows[-1]["spell_f1_mean"], rows[-1]["macro_f1"]))
+        if log:
+            log("{:<22} {:<8} {:<14} spellF1 {:.4f}  macroF1 {:.4f}".format(
+                experiment, dataset, match_id, rows[-1]["spell_f1_mean"], rows[-1]["macro_f1"]))
     if rows:
         write_rows(rows, sheet, external_dir)
     return rows

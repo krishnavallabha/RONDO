@@ -101,7 +101,13 @@ The validation harness needs no match data at all — it runs on public external
 python -m rondo.harness fetch      # IDSSE + Metrica sample, ~2.6 GB into data/external/
 python -m rondo.harness labels     # external data -> H/A/D labels.csv per match
 python -m rondo.harness score --baseline all --bootstrap 400
+python -m rondo.harness run --clean --bootstrap 400   # the whole pipeline, on those matches
 ```
+
+`run` corrupts each external ball to this match's measured noise profile
+(`profiles/metrica_native.json`), builds M2 evidence from it, decodes it with M3 and scores the
+result with the official scorer — the same code path as the submission, on matches with known
+labels.
 
 Optional one-off M0 inspection of the ATD channels (`ball_state`, `ball_owning_team`) needs
 `kloppy`, which the pipeline itself does not:
@@ -126,7 +132,8 @@ RONDO/
 │   ├── dummy.py        synthetic evidence for running end to end without data
 │   ├── run.py          evidence → decoder → CSV
 │   ├── signals/        Signals (A): M0 inspect, M1 ingest + ball cleaning, M2 evidence, export
-│   └── harness/        Harness (C): external data, H/A/D labels, official scorer, results sheet
+│   └── harness/        Harness (C): external data, H/A/D labels, corruption model, scorer, run
+├── profiles/           measured ball-noise profiles, so external runs need no match data
 ├── docs/               EXTERNAL_DATA.md — provenance, label rules, decision rule
 ├── tests/              unit + end-to-end tests (run in CI)
 ├── more-than-a-hack-2027/   official challenge repo: scorer, rules, starter code
@@ -199,6 +206,7 @@ Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](d
 - [x] **Nov 12** Harness: IDSSE + Metrica sample downloaded and pinned, converted to H/A/D labels, official scorer wired to external matches with a bootstrap results sheet ([docs/EXTERNAL_DATA.md](docs/EXTERNAL_DATA.md))
 - [ ] **Nov 12** Lock the M2 → M3 contract with the whole team
 - [x] **Nov 13** Full HMM with minimum durations + restart logic; first real-match CSV passes the validator. Held-out IDSSE spellF1 0.37 (corrupted ball) / 0.48 (stoppages hidden) / 0.51 (full ball), above the 0.2433 floor
+- [x] **Nov 13** Harness: corruption model from a measured noise profile (`profiles/metrica_native.json`), all 9 external matches labelled and md5-verified, and the whole pipeline scored on them **without the gated data** — held-out IDSSE 0.363 corrupted / 0.509 clean, every match above the floor
 - [ ] **Nov 13** First valid upload (Google Form)
 - [ ] **Nov 14** Boundary snapping + expected-F1 decoding; core pipeline frozen
 - [ ] **Nov 15** Add-ons (M4–M7), each kept only if it beats bootstrap noise

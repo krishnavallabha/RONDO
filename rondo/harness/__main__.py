@@ -5,13 +5,15 @@
     python -m rondo.harness labels                      external data -> labels.csv per match
     python -m rondo.harness score --baseline all --bootstrap 400
     python -m rondo.harness score --pred out/dummy.csv --match Sample_Game_1
+    python -m rondo.harness noise --match Sample_Game_1       measure a ball-noise profile
+    python -m rondo.harness run --bootstrap 400               the whole pipeline, externally
 """
 
 import argparse
 import os
 import sys
 
-from rondo.harness import datasets, idsse, labels, metrica, score
+from rondo.harness import datasets, idsse, labels, metrica, noise, score
 
 
 def add_selection(parser):
@@ -96,6 +98,57 @@ def cmd_score(args):
     return 0
 
 
+def cmd_noise(args):
+    """Measure a ball-noise profile, or print one that is already committed."""
+    if args.profile and not (args.evidence or args.match):
+        profile = noise.load(args.profile)
+    elif args.evidence:
+        profile = noise.from_evidence(args.evidence)
+    elif args.match:
+        pairs = [pair for pair in score.available(args.external_dir) if pair[1] in args.match]
+        if not pairs:
+            print("no built external match named {}".format(args.match))
+            return 1
+        profile = noise.from_matches(pairs, args.external_dir)
+    else:
+        print("profiles:", ", ".join(noise.available()) or "(none)")
+        print("measure one with --evidence out/evidence.npz or --match Sample_Game_1")
+        return 0
+
+    print("{} ({})".format(profile["source"], profile["scope"]))
+    print("  missing {:.1%} over {} frames in {} gaps".format(
+        profile["missing_rate"], profile["n_frames"], profile["n_gaps"]))
+    print("  gap frames: median {:.0f}, mean {:.0f}, max {}; {:.0%} of missing frames sit in "
+          "gaps of {:.0f} s or more".format(
+              profile["median_gap_frames"], profile["mean_gap_frames"], profile["max_gap_frames"],
+              profile["long_gap_share_of_missing"], noise.LONG_GAP_S))
+    print("  jitter: {:.3f} m in x, {:.3f} m in y".format(*profile["jitter_m"]))
+    if args.out:
+        print("wrote", noise.save(profile, args.out))
+    return 0
+
+
+def cmd_run(args):
+    from rondo.harness import run as harness_run
+    return harness_run.main(_run_argv(args))
+
+
+def _run_argv(args):
+    """Rebuild the flags for rondo.harness.run, which owns its own parser."""
+    argv = []
+    for name in ("dataset", "match", "profile"):
+        for value in getattr(args, name) or []:
+            argv += ["--" + name, value]
+    if args.clean:
+        argv.append("--clean")
+    argv += ["--seed", str(args.seed), "--bootstrap", str(args.bootstrap)]
+    if args.sheet:
+        argv += ["--sheet", args.sheet]
+    if args.external_dir:
+        argv += ["--external-dir", args.external_dir]
+    return argv
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m rondo.harness",
                                      description=__doc__.splitlines()[0])
@@ -125,6 +178,25 @@ def main(argv=None):
                          help="bootstrap draws for the spellF1 interval (400 is plenty)")
     scoring.add_argument("--sheet", help="results CSV to append to")
     scoring.set_defaults(run=cmd_score)
+
+    profile = sub.add_parser("noise", help="measure or show a ball-noise profile")
+    add_selection(profile)
+    profile.add_argument("--evidence", help="M2 evidence npz of this match (needs the data)")
+    profile.add_argument("--profile", help="show a committed profile by name instead")
+    profile.add_argument("--out", help="write the measured profile here (name or path)")
+    profile.set_defaults(run=cmd_noise)
+
+    pipeline = sub.add_parser("run", help="pipeline -> external matches -> scorer, no match data")
+    add_selection(pipeline)
+    pipeline.add_argument("--profile", action="append",
+                          help="noise profile for the corrupted condition "
+                               "(default: metrica_native)")
+    pipeline.add_argument("--clean", action="store_true",
+                          help="also score the provider's uncorrupted ball")
+    pipeline.add_argument("--seed", type=int, default=0, help="corruption seed")
+    pipeline.add_argument("--bootstrap", type=int, default=0)
+    pipeline.add_argument("--sheet")
+    pipeline.set_defaults(run=cmd_run)
 
     args = parser.parse_args(argv)
     return args.run(args)
