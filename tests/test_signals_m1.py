@@ -56,6 +56,16 @@ class TeleportTest(unittest.TestCase):
         self.assertTrue(np.isnan(out[50]).all())
         self.assertFalse(np.isnan(out[:50]).any() or np.isnan(out[51:]).any())
 
+    def test_long_stretch_between_two_relocations_is_kept(self):
+        # Ball relocated twice (two dead-ball restarts). The middle 300 frames are real play: far
+        # longer than any tracker glitch, so they must survive even though the track "reconnects"
+        # around them in the elapsed-time sense. Before the excursion cap they were dropped.
+        xy = np.concatenate([track(400), track(300, start=(20.0, 50.0)),
+                             track(400, start=(60.0, 30.0))])
+        out, n = m1.reject_teleports(xy)
+        self.assertEqual(n, 2)  # only the first frame after each jump
+        self.assertFalse(np.isnan(out[401:700]).any())
+
     def test_fast_but_possible_kick_kept(self):
         xy = track(10, step=(1.2, 0.0))  # 30 m/s
         out, n = m1.reject_teleports(xy)

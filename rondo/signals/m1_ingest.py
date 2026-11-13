@@ -34,6 +34,7 @@ GAP_BRIDGE_CONDITIONAL = 50  # frames (when velocity vectors agree)
 # Ball cleaning details
 POSITION_MARGIN = 10.0        # m beyond a pitch line; further out is tracking junk, not play
 EDGE_MIN_FRAMES = 5           # a leading/trailing segment shorter than this next to a jump is dropped
+MAX_EXCURSION_FRAMES = 50     # 2 s: a tracker glitch is brief; a longer segment between jumps is play
 VELOCITY_FRAMES = 3           # frames averaged to get the velocity at a gap edge
 STATIONARY_STEP = 0.05        # m/frame (1.25 m/s): below this the ball counts as still
 VELOCITY_ANGLE_DEG = 30.0     # entry/exit directions must agree within this
@@ -139,12 +140,16 @@ def reject_out_of_pitch(ball_xy, pitch, margin=POSITION_MARGIN):
     return xy, int(bad.sum())
 
 
-def reject_teleports(ball_xy, max_step=TELEPORT_DIST_PER_FRAME, min_edge=EDGE_MIN_FRAMES):
+def reject_teleports(ball_xy, max_step=TELEPORT_DIST_PER_FRAME, min_edge=EDGE_MIN_FRAMES,
+                     max_excursion=MAX_EXCURSION_FRAMES):
     """Remove impossible jumps (more than `max_step` metres per elapsed frame). Returns (xy, n_removed).
 
     The track is cut into segments at every impossible jump. A segment is an excursion, and is
-    dropped, when the track on both sides of it reconnects without it and it is no longer than
-    either neighbour: the tracker briefly followed something else and came back. Segments that
+    dropped, when it is short (at most `max_excursion` frames), no longer than either neighbour,
+    and the track on both sides of it reconnects without it: the tracker briefly followed
+    something else and came back. The length cap matters: the reconnect test allows max_step
+    metres per elapsed frame, so across a long segment almost anything "reconnects", and without
+    the cap whole stretches of real play between two relocations were dropped. Segments that
     do not reconnect are a real relocation, such as the tracker re-locking on the ball after a
     miss, so they are kept as separate stretches with a break at the jump (the first frame after
     it is blanked) so that nothing later smooths or differentiates across it. A leading or
@@ -168,7 +173,8 @@ def reject_teleports(ball_xy, max_step=TELEPORT_DIST_PER_FRAME, min_edge=EDGE_MI
         merged.append(seg)
         while len(merged) >= 3:
             s0, s1, s2 = merged[-3:]
-            if len(s1) <= min(len(s0), len(s2)) and reachable(s0[-1], s2[0]):
+            if (len(s1) <= min(len(s0), len(s2), max_excursion)
+                    and reachable(s0[-1], s2[0])):
                 merged[-3:] = [np.concatenate([s0, s2])]
             else:
                 break
