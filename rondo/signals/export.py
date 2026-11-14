@@ -1,6 +1,10 @@
 """Run M1-M2 and write the evidence file the decoder reads.
 
     python -m rondo.signals.export --out out/evidence.npz
+    python -m rondo.signals.export --out out/evidence.npz --no-m7     # heuristic evidence only
+
+With M7 (the default) the file also carries p_dead and p_home from the learned emissions
+(rondo/signals/m7_learned.py); the decoder uses them when they are present.
 
 Any other match (the harness): build plain arrays, then
 
@@ -17,7 +21,7 @@ import numpy as np
 
 from games import GAME, GAMES
 from rondo import contract
-from rondo.signals import m2_evidence
+from rondo.signals import m1_ingest, m2_evidence
 
 TEAM_KEYS = ("restart_team", "smart_tag_team")
 
@@ -43,11 +47,18 @@ def save(evidence, path):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default=os.path.join("out", "evidence.npz"))
+    parser.add_argument("--no-m7", action="store_true", help="leave out the learned p_dead / p_home")
     args = parser.parse_args(argv)
 
-    evidence = m2_evidence.main()
+    m1 = m1_ingest.main(GAME)
+    evidence = m2_evidence.main(m1_data=m1)
     if len(evidence["ball_missing"]) != GAMES[GAME]["n_video_frames"]:
         raise ValueError("evidence length does not match the tactical video")
+    if not args.no_m7:
+        from rondo.signals import m7_learned
+        from rondo.signals.m2_validate import real_half
+        evidence["p_dead"], evidence["p_home"] = m7_learned.probabilities(
+            evidence, m1["player_xy"], m1["player_team"], real_half(len(evidence["ball_missing"])))
     print("wrote", save(evidence, args.out))
 
 

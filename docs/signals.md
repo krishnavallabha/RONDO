@@ -120,6 +120,42 @@ team in possession spreads out and the defender compacts. It exists when the bal
 carries signal (AUC 0.72 against our own control evidence; 0.69–0.80 against the IDSSE labels) but
 did not improve decoding on the harness; see "Tried and not used".
 
+## M7: learned emissions
+
+`rondo/signals/m7_learned.py`. Two logistic models turn the M2 evidence and the tracking into
+per-frame `p_dead` and `p_home` (home given alive). `export` writes them into the evidence file and
+the decoder uses them in place of the heuristic emissions (`docs/decoder.md`, M7 path).
+`--no-m7` writes the heuristic evidence only.
+
+- **Training data**: the 9 external matches (7 IDSSE, 2 Metrica) with their public labels, each
+  under 5 conditions: full ball; stoppages hidden (`deadmiss`); `deadmiss` plus 1.0 m and 1.6 m of
+  slow player-position noise; our match's missing-ball mask transplanted plus 1.3 m noise. Every
+  4th graded frame is a row. No label of our match is read. The transplanted mask is the only use
+  of our match in training.
+- **Team model** (50 features, no intercept): soft ball-to-team proximity at windows from 1 frame
+  to 12 s, sustained control, credited touches and soft touches (any kick, credited by proximity)
+  as past and future decays, team width. Every feature is home minus away and each row is trained
+  from both viewpoints, so swapping the teams gives exactly `1 - p_home`. Rows are weighted so
+  each possession counts about equally (short spells are what spellF1 scores).
+- **Dead model** (54 features): ball missing and for how long, position inside the gap, player
+  speed divided by the match's own median, the `dead_ball` levels, ball still / out / fast, kicks,
+  distance to the lines.
+- **Weights** are committed (`m7_weights.json`, 8 kB), so a clean clone regenerates the submission
+  without the external data. `python -m rondo.signals.m7_learned train` refits them from the
+  external matches (about 8 minutes, 3 workers) and reproduces the file exactly on this machine.
+
+Harness, out-of-fold (models never see the scored match; Metrica held out as a block, IDSSE in 3
+folds), decoder defaults, mean spellF1 over the 5 conditions:
+
+| | Metrica | IDSSE |
+|---|---|---|
+| Heuristic emissions (Nov 14, `min_alive` 75, previous decoder) | 0.406 | 0.378 |
+| M7 through the decoder's M7 path | 0.485 | 0.485 |
+
+By condition (M7): Metrica 0.614 / 0.521 / 0.474 / 0.433 / 0.386, IDSSE 0.596 / 0.528 / 0.489 /
+0.437 / 0.377. The restart pull the decoder adds on our match (1,050 frames) cannot be tested
+externally.
+
 ## External matches
 
 `build_evidence(ball_xy, player_xy, player_team, pitch)` produces the same evidence for any match
