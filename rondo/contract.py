@@ -26,6 +26,14 @@ COLUMNS = {
     "smart_tag_team": ("team", np.nan),
 }
 
+# Optional, checked only when present. M7 learned emissions (A): calibrated per-frame
+# P(dead) and P(home | alive). When both are there the decoder uses them instead of the
+# control/touch/dead_ball heuristics (decoder.emission_loglik).
+OPTIONAL = {
+    "p_dead": ("prob", 0.5),
+    "p_home": ("prob", 0.5),
+}
+
 
 def empty(n_frames):
     """Evidence that says nothing: every key at its missing value."""
@@ -43,7 +51,7 @@ def check(evidence, n_frames):
     missing = sorted(set(COLUMNS) - set(evidence))
     if missing:
         problems.append("missing keys {}".format(missing))
-    for key, (kind, _) in COLUMNS.items():
+    for key, (kind, _) in list(COLUMNS.items()) + list(OPTIONAL.items()):
         if key not in evidence:
             continue
         value = np.asarray(evidence[key])

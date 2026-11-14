@@ -46,6 +46,27 @@ class MinimumDurationTest(unittest.TestCase):
         codes = decoder.decode_half(loglik)
         self.assertTrue((codes[110:190] == decoder.A).all())
 
+    def test_chain_viterbi_matches_dense_viterbi(self):
+        rng = np.random.default_rng(3)
+        loglik = np.log(rng.dirichlet([1, 1, 1], size=2000))
+        for mins in ((1, 1), (3, 5), (10, 25)):
+            params = dict(decoder.DEFAULTS, min_alive=mins[0], min_dead=mins[1])
+            state_of, trans, init = decoder.expand(params)
+            dense = state_of[decoder.viterbi(loglik[:, state_of], trans, init)]
+            np.testing.assert_array_equal(decoder.chain_viterbi(loglik, params), dense)
+
+    def test_posterior_samples_respect_minimums_and_follow_evidence(self):
+        loglik = np.log(np.tile([.8, .1, .1], (600, 1)))
+        loglik[300:] = np.log([.1, .8, .1])
+        samples = decoder.sample_paths(loglik, n_samples=20, seed=0)
+        self.assertGreater((samples[:, 50:250] == decoder.H).mean(), 0.95)
+        self.assertGreater((samples[:, 350:550] == decoder.A).mean(), 0.95)
+        for codes in samples:
+            edges = np.flatnonzero(np.diff(codes)) + 1
+            for a, b in zip(edges[:-1], edges[1:]):
+                minimum = decoder.DEFAULTS["min_dead" if codes[a] == decoder.D else "min_alive"]
+                self.assertGreaterEqual(b - a, minimum)
+
     def test_min_one_is_plain_hmm(self):
         params = dict(decoder.DEFAULTS, min_alive=1, min_dead=1)
         state_of, trans, _ = decoder.expand(params)
@@ -70,6 +91,17 @@ class RestartTest(unittest.TestCase):
         ev["restart_team"][55:70] = 1.0  # A takes the restart, no control evidence at all
         codes = decoder.decode_half(decoder.emission_loglik(ev))
         self.assertTrue((codes[75:] == decoder.A).all())
+
+    def test_m7_probabilities_replace_heuristics(self):
+        ev = contract.empty(4)
+        ev["control_H"][:] = True  # heuristics say H; M7 says A, and M7 wins when present
+        ev["p_dead"] = np.full(4, 0.1)
+        ev["p_home"] = np.full(4, 0.2)
+        contract.check(ev, 4)
+        self.assertTrue((decoder.emission_loglik(ev).argmax(axis=1) == decoder.A).all())
+        ev["p_home"][0] = 1.5
+        with self.assertRaisesRegex(ValueError, "p_home"):
+            contract.check(ev, 4)
 
     def test_internal_minus_one_rejected(self):
         ev = contract.empty(5)
