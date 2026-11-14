@@ -26,7 +26,7 @@ DEFAULTS = {
     "control_weight": 0.4,    # how far sustained control pulls team share from 0.5
     "touch_weight": 0.2,
     "restart_weight": 0.45,   # how far a located restart pulls team share toward its taker
-    "min_alive": 75,          # frames; 3 s. Helps under our ball noise (m3_eval, Nov 14)
+    "min_alive": 75,          # frames; 3 s. Chosen on the external harness (m3_eval, Nov 14)
     "min_dead": 25,           # frames; minimum D spell
     "m7_prior_dead": 0.42,    # dead share of M7's external training matches (EXTERNAL_DATA.md)
 }
