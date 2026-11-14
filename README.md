@@ -208,7 +208,8 @@ Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](d
 - [x] **Nov 13** Full HMM with minimum durations + restart logic; first real-match CSV passes the validator. Held-out IDSSE spellF1 0.37 (corrupted ball) / 0.48 (stoppages hidden) / 0.51 (full ball), above the 0.2433 floor
 - [x] **Nov 13** Harness: corruption model from a measured noise profile (`profiles/metrica_native.json`), all 9 external matches labelled and md5-verified, and the whole pipeline scored on them **without the gated data** — held-out IDSSE 0.363 corrupted / 0.509 clean, every match above the floor
 - [ ] **Nov 13** First valid upload (Google Form)
-- [x] **Nov 14** Decoder: min_alive 75, fast chain Viterbi, M7 probability inputs; expected-F1 decoding built and tested but dropped, boundary snapping skipped (boundaries already within 1-2 frames). See [docs/decoder.md](docs/decoder.md)
+- [x] **Nov 14** Decoder: min_alive 75, fast chain Viterbi, M7 probability inputs. Boundary snapping and expected-F1 decoding integrated and tested on out-of-fold M7: both neutral, so off by default. No decoder setting moves the harness by more than the 0.04 band. See [docs/decoder.md](docs/decoder.md)
+- [x] **Nov 14** M7 learned emissions: harness 0.486 Metrica / 0.485 IDSSE vs heuristic 0.43 / 0.41 (out-of-fold)
 - [ ] **Nov 15** Add-ons (M4–M7), each kept only if it beats bootstrap noise
 - [ ] **Nov 16** Technical document, clean-clone reproduction, final upload
 

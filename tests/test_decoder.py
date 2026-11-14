@@ -82,6 +82,22 @@ class MinimumDurationTest(unittest.TestCase):
             self.assertGreaterEqual(b - a, minimum)
 
 
+class SnapTest(unittest.TestCase):
+    def test_switch_moves_to_new_owners_first_touch_only(self):
+        H, A, D = decoder.H, decoder.A, decoder.D
+        codes = np.array([H] * 50 + [A] * 50 + [D] * 50 + [H] * 50, dtype=np.int8)
+        th, ta = np.zeros(200, bool), np.zeros(200, bool)
+        ta[40] = ta[45] = True          # A's first touch 10 frames before the decoded switch
+        th[160] = True                  # a touch after D: D->H switches are not moved
+        out = decoder.snap_switches(codes, th, ta, window=25)
+        self.assertTrue((out[:40] == H).all() and (out[40:100] == A).all())
+        np.testing.assert_array_equal(out[100:], codes[100:])
+        ta[:] = False
+        ta[70] = True                   # later touch: switch moves forward
+        out = decoder.snap_switches(codes, th, ta, window=25)
+        self.assertTrue((out[:70] == H).all() and (out[70:100] == A).all())
+
+
 class RestartTest(unittest.TestCase):
     def test_restart_team_picks_owner_after_stoppage(self):
         n = 120

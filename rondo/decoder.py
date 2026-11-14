@@ -231,7 +231,7 @@ def mbr_half(loglik, params=DEFAULTS, n_samples=40, seed=0):
     highest mean spellF1 against the samples, scored by the official possession_metrics code.
 
     shortcut: 40 samples, not the plan's 300 (pairwise scoring is O(samples^2) at ~15 ms a pair);
-    raise n_samples if a run shows the choice is still moving.
+    on the harness 40 and 100 samples score the same (docs/decoder.md), so more would not help.
     """
     import possession_metrics as pm
     samples = sample_paths(loglik, params, n_samples, seed)
@@ -240,6 +240,29 @@ def mbr_half(loglik, params=DEFAULTS, n_samples=40, seed=0):
     expected = [np.mean([pm.spell_scores(ref, cand, runs)["mean_f1"] for ref in samples])
                 for cand in candidates]
     return candidates[int(np.argmax(expected))]
+
+
+def snap_switches(codes, touch_H, touch_A, window):
+    """Move each direct H<->A switch to the new owner's first touch within +-window frames.
+
+    Possession changes when the other team touches the ball; the HMM places the switch where the
+    evidence balance tips, which is spread ~+-0.7 s around it on the harness. Switches through D,
+    and switches with no touch nearby, are left alone; a switch never crosses its neighbours.
+    """
+    codes = codes.copy()
+    touches = {H: np.asarray(touch_H, bool), A: np.asarray(touch_A, bool)}
+    edges = np.flatnonzero(np.diff(codes) != 0) + 1
+    for i, j in enumerate(edges):
+        old, new = int(codes[j - 1]), int(codes[j])
+        if D in (old, new):
+            continue
+        lo = max(j - window, edges[i - 1] + 1 if i else 1)
+        hi = min(j + window, edges[i + 1] - 1 if i + 1 < len(edges) else len(codes) - 1)
+        hits = np.flatnonzero(touches[new][lo:hi + 1])
+        if len(hits):
+            k = lo + int(hits[0])
+            codes[min(j, k):max(j, k)] = new if k < j else old
+    return codes
 
 
 def decode_half(loglik, params=DEFAULTS):

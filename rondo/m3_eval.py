@@ -106,8 +106,11 @@ def decode_codes(ev, half, params):
         rows = np.flatnonzero(half == number)
         start, stop = int(rows.min()), int(rows.max()) + 1
         half_ll = loglik[start:stop]
-        codes[start:stop] = (decoder.mbr_half(half_ll, params) if params.get("mbr")
-                             else decoder.decode_half(half_ll, params))
+        codes[start:stop] = (decoder.mbr_half(half_ll, params, params.get("mbr_n", 40))
+                             if params.get("mbr") else decoder.decode_half(half_ll, params))
+        if params.get("snap"):
+            codes[start:stop] = decoder.snap_switches(codes[start:stop], ev["touch_H"][start:stop],
+                                                      ev["touch_A"][start:stop], params["snap"])
     return codes
 
 
@@ -124,6 +127,9 @@ EXPERIMENTS = {
     "m7_direct1e3": {"p_switch_direct": 1e-3},
     "m7_prior30": {"m7_prior_dead": 0.30},
     "m7_prior55": {"m7_prior_dead": 0.55},
+    "m7_snap25": {"snap": 25},
+    "m7_snap50": {"snap": 50},
+    "m7_mbr100": {"mbr": True, "mbr_n": 100},
 }
 BASE = "m7"
 

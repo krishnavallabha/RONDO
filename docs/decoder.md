@@ -26,11 +26,21 @@ Mean spellF1 over the five; the M7 row reproduces A's out-of-fold numbers.
 |---|---|---|---|---|
 | **M7, defaults** | **0.486** | **0.485** | 0.89 / 0.69 | shipped |
 | Heuristic emissions | 0.429 | 0.409 | 0.67 / 0.59 | fallback (`export --no-m7`) |
-| Expected-F1 (MBR) decoding | −0.002 | −0.002 | 0.91 / 0.71 | off: neutral now that the probabilities are calibrated |
+| Expected-F1 (MBR) decoding, 40 / 100 samples | −0.002 / −0.005 | −0.002 / −0.001 | 0.91 / 0.71 | off: neutral now that the probabilities are calibrated, and unchanged from 40 to 100 samples, so the plan's 300 would not change it |
 | `min_alive` 50 / 100 / 150 | −0.009 / −0.013 / −0.038 | +0.013 / −0.016 / −0.056 | | 75 stays |
 | `min_dead` 50 | 0.000 | 0.000 | | no effect |
 | Direct-switch cost 5e-5 / 1e-3 | 0.000 / −0.001 | 0.000 / 0.000 | | no effect |
 | `m7_prior_dead` 0.30 / 0.55 | −0.001 / −0.003 | 0.000 / −0.003 | | 0.42 stays |
+| Boundary snapping, ±25 / ±50 frames (`snap_switches`) | −0.001 / −0.003 | +0.001 / 0.000 | | off: neutral |
+
+**Boundaries.** Measured as predicted minus true frame, for the nearest boundary of the same kind.
+Dead-ball boundaries (alive→D, D→alive) have a median of 0 frames in every condition. With our real
+missing mask (`n13corrupt`), only 65–74% fall within 2 s, but those still have a median of 0. A
+caveat: `deadmiss` hides the ball exactly at true stoppages, so it flatters these boundaries.
+Direct H↔A switches show no bias (median −1 to +3 frames) but an interquartile range of about
+±18 frames, and only 33–62% of true switches have a predicted switch within 2 s.
+`snap_switches` moves each H↔A switch to the new owner's first touch. It changes nothing, so the
+loss is in switches the decoder misses, not in their timing. Code kept, off by default.
 
 No decoder setting moves the score by more than the 0.04 band. The decoder is saturated; what's
 left is in the evidence. Under correct (4 s) player noise, 1.6 m costs the heuristic about 0.19 on
