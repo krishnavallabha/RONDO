@@ -67,6 +67,10 @@ Better on 9 of 9 matches and 41 of 45 match-conditions; below the 0.04 band on t
 `min_alive` 50 / 100 / 150 on top: no further gain. On our match it cuts possessions from 406 to
 375 (6.2 → 5.7 per live minute). Retrain: `python -m rondo.signals.m7_learned train --relabel 50`.
 
+**Shipped (Nov 16):** the committed `m7_weights.json` is now this model; the submission is
+`0e6a30c5…` (previous M7 `c6fbd909…`). Chosen on the harness only; on the public window the two
+tie (0.353 vs 0.363, both 26 possessions), well inside its noise.
+
 ## Earlier decisions (heuristic emissions, Nov 14 morning)
 
 Ball conditions: `deadmiss` and `noisy` (deadmiss plus 1.6 m player noise). The noise was
