@@ -157,6 +157,25 @@ def decode_codes(ev, half, params):
     return codes
 
 
+def simulate_tags(gt, half, seed, cover=0.4, jitter=25, wrong=0.2, pad=10):
+    """Contract restart_team as Smart Tagging + M2 localisation would give it, from the truth:
+    each true restart (D -> H/A inside a half) is tagged with probability `cover`, its frame is
+    off by N(0, jitter) frames, and the team is wrong with probability `wrong`. Defaults from our
+    match: 50 located restarts vs 126 decoded ones; 80% agree with the decoded team there."""
+    rng = np.random.default_rng(seed)
+    out = np.full(len(gt), np.nan)
+    alive = (gt == pm.H) | (gt == pm.A)
+    for f in np.flatnonzero(alive[1:] & (gt[:-1] == pm.D) & (half[1:] == half[:-1])) + 1:
+        if rng.random() >= cover:
+            continue
+        team = float(gt[f] == pm.A)
+        if rng.random() < wrong:
+            team = 1.0 - team
+        g = int(np.clip(f + round(rng.normal(0, jitter)) if jitter else f, 0, len(gt) - 1))
+        out[max(0, g - pad):g + pad + 1] = team
+    return out
+
+
 # "m7": True = use the out-of-fold M7 probabilities; otherwise the heuristic emissions.
 EXPERIMENTS = {
     "heur": {"m7": False},
@@ -182,6 +201,16 @@ EXPERIMENTS = {
     "m7c_wsqrt": {"train": "ctl", "weighting": "sqrt"},
     "m7c_wsqrt_s2": {"train": "ctl", "weighting": "sqrt", "stage2": True},
     "m7c_s2": {"train": "ctl", "stage2": True},
+    # Smart Tagging restarts, simulated from the truth (simulate_tags), on the shipped sqrt M7.
+    # "tags": (cover, jitter frames, wrong-team rate). Compare *_dead against the same tags.
+    "t25": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 25, 0.2)},
+    "t25_dead": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 25, 0.2), "restart_dead": 0.9},
+    "t25_dead125": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 25, 0.2),
+                    "restart_dead": 0.9, "restart_dead_len": 125},
+    "t25_dead6": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 25, 0.2), "restart_dead": 0.6},
+    "t100": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 100, 0.2)},
+    "t100_dead": {"train": "ctl", "weighting": "sqrt", "tags": (0.4, 100, 0.2),
+                  "restart_dead": 0.9},
 }
 BASE = "m7"
 
@@ -199,12 +228,16 @@ def score_match(args):
             use_m7 = spec.pop("m7", True)
             train = _train_of(spec, relabel)
             spec.pop("train", None), spec.pop("weighting", None), spec.pop("stage2", None)
+            tags = spec.pop("tags", None)
             if use_m7 and train not in probs:
                 with np.load(_path(dataset, match_id, cond, _pkind(*train))) as p:
                     probs[train] = dict(ev, p_dead=p["p_dead"], p_home=p["p_home"])
             params = dict(decoder.DEFAULTS, **spec)
-            r = pm.spell_scores(gt, decode_codes(probs[train] if use_m7 else ev, it["half"], params),
-                                runs)
+            evidence = probs[train] if use_m7 else ev
+            if tags:
+                seed = sum(map(ord, match_id + cond))     # same tags for every variant
+                evidence = dict(evidence, restart_team=simulate_tags(gt, it["half"], seed, *tags))
+            r = pm.spell_scores(gt, decode_codes(evidence, it["half"], params), runs)
             out.append((name, dataset, match_id, cond, r["mean_f1"], r["n_pred"], r["n_gt"]))
     return out
 

@@ -212,7 +212,9 @@ Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](d
 - [x] **Nov 14** M7 learned emissions: harness 0.486 Metrica / 0.485 IDSSE vs heuristic 0.43 / 0.41 (out-of-fold)
 - [x] **Nov 16** M7 retrained on external labels relabelled to CHALLENGE.md's "controlled possession" (2 s): +0.022 IDSSE / +0.029 Metrica, better on 9 of 9 matches; then √ training weights, +0.015 Metrica / +0.006 IDSSE more. Second-stage model and 4-state decoder tested or measured and dropped ([docs/decoder.md](docs/decoder.md))
 - [ ] **Nov 15** Add-ons (M4–M7), each kept only if it beats bootstrap noise
-- [ ] **Nov 16** Technical document, clean-clone reproduction, final upload
+- [x] **Nov 16** Smart Tagging restarts tested with simulated tags: the restart pull is harmless, extra dead-ball evidence before restarts is worse on IDSSE, off
+- [x] **Nov 16** Technical document ([docs/TECHNICAL.md](docs/TECHNICAL.md)); clean clone reproduces `cf22e581…` byte for byte
+- [ ] **Nov 17** Final upload
 
 ## Rules we follow
 

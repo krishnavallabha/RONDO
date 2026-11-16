@@ -29,12 +29,28 @@ DEFAULTS = {
     "min_alive": 75,          # frames; 3 s. Chosen on the external harness (m3_eval, Nov 14)
     "min_dead": 25,           # frames; minimum D spell
     "m7_prior_dead": 0.42,    # dead share of M7's external training matches (EXTERNAL_DATA.md)
+    "restart_dead": 0.0,      # M7 path: p_dead floor just before a located restart (0 = off)
+    "restart_dead_len": 50,   # frames before the restart frame that floor covers
 }
 
 
 def graded_blocks(game=GAME):
     """[(start, stop)] half-open video-frame spans that are scored -- the two halves."""
     return [(first, last + 1) for _, first, last in half_video_blocks(game)]
+
+
+def restart_dead_floor(p_dead, restart, params, pad=10):
+    """A located restart ends a stoppage: raise p_dead to params["restart_dead"] on the
+    params["restart_dead_len"] frames before it. restart_team marks restart frame +-pad
+    (m2_evidence.RESTART_PAD), so the restart frame is each marked run's start + pad."""
+    marked = ~np.isnan(restart)
+    starts = np.flatnonzero(marked & ~np.r_[False, marked[:-1]])
+    out = p_dead.copy()
+    for s in starts:
+        f = s + pad if s > 0 else s
+        lo = max(0, f - params["restart_dead_len"])
+        out[lo:f] = np.maximum(out[lo:f], params["restart_dead"])
+    return out
 
 
 def emission_loglik(ev, params=DEFAULTS):
@@ -55,6 +71,8 @@ def emission_loglik(ev, params=DEFAULTS):
         # M7: a classifier gives posteriors P(state | x). The HMM wants likelihoods, and its
         # transitions already carry the class prior, so divide it out (hybrid HMM/NN).
         p_dead = np.clip(ev["p_dead"], EPS, 1 - EPS)
+        if params.get("restart_dead"):
+            p_dead = restart_dead_floor(p_dead, restart, params)
         share = np.clip(ev["p_home"] + params["restart_weight"] * pull, EPS, 1 - EPS)
         q = params["m7_prior_dead"]
         post = np.stack([(1 - p_dead) * share, (1 - p_dead) * (1 - share), p_dead], axis=1)

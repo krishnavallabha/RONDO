@@ -126,6 +126,22 @@ class RestartTest(unittest.TestCase):
             decoder.emission_loglik(ev)
 
 
+class RestartDeadTest(unittest.TestCase):
+
+    def test_floor_covers_the_frames_before_each_located_restart(self):
+        restart = np.full(300, np.nan)
+        restart[90:111] = 0          # restart frame 100, marked +-10
+        p = np.full(300, 0.1)
+        params = dict(decoder.DEFAULTS, restart_dead=0.9, restart_dead_len=50)
+        out = decoder.restart_dead_floor(p, restart, params)
+        self.assertTrue((out[50:100] == 0.9).all())
+        self.assertTrue((out[:50] == 0.1).all() and (out[100:] == 0.1).all())
+        self.assertTrue((p == 0.1).all())            # input untouched
+
+    def test_off_by_default(self):
+        self.assertEqual(decoder.DEFAULTS["restart_dead"], 0.0)
+
+
 class EndToEndTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

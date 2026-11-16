@@ -79,6 +79,8 @@ tie (0.353 vs 0.363, both 26 possessions), well inside its noise.
 | Equal training weights (`none`) | −0.011 | −0.016 | 0.82 / 0.74 | worse |
 | Second-stage context model (first-stage logits over windows up to ±10 s, refit out-of-fold) | −0.022 | −0.008 | | worse alone |
 | Second stage on top of √ weights | +0.016 | +0.008 | | +0.001 / +0.002 over √ alone: not worth a second model |
+| Smart Tagging restarts, simulated (`m3_eval.simulate_tags`: 40% of true restarts, N(0, 25 or 100) frames, 20% wrong team) | +0.001 / 0.000 (25), +0.001 / 0.000 (100) | | | the shipped restart pull is harmless |
+| + `restart_dead` 0.9 over 50 frames before each restart (also 0.6; 125 frames) | +0.001 / −0.003 (25); −0.007 / −0.011 (100) | | | off: worse on IDSSE |
 | 4-state decoder (dead-after-H / dead-after-A) | — | — | | not built: on the external matches the team before a stoppage restarts 43–62% of the time (about half), so the extra state carries no information |
 
 Shipped training command: `python -m rondo.signals.m7_learned train --relabel 50 --weighting sqrt`.
@@ -95,5 +97,5 @@ with M7 (table above).
 | `min_alive` 10 → 75 | +0.029 | +0.016 | −0.019 | **kept**: helps in the condition that matches our ball, never below −0.02 |
 | `min_dead` 25 → 50 (with 75) | +0.005 | −0.002 | +0.001 | not kept: no effect |
 | Expected-F1 (MBR) decoding, 40 posterior samples | −0.030 | −0.020 | −0.031 | **dropped**: the heuristic posterior is not calibrated, so samples add noise. Code kept, off by default (`mbr_half`); retest once M7 probabilities are in |
-| Restart pull (`restart_weight`) | — | — | — | cannot be tested externally (no Smart Tagging there); acts on ~1,050 frames of our match |
+| Restart pull (`restart_weight`) | — | — | — | not testable here; later tested with simulated tags (table above): harmless |
 
