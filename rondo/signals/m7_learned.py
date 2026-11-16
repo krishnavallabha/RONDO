@@ -233,13 +233,46 @@ def logit(model, X):
     return Z @ model["beta"]
 
 
-def spell_weights(gt):
-    """Possession-equal weights: a run of n frames weighs clip(200 / n, 0.25, 4) per frame."""
+WEIGHTINGS = {"clip": 1.0, "sqrt": 0.5, "none": 0.0}   # exponent on 200 / run length
+
+
+def spell_weights(gt, weighting="clip"):
+    """Per-frame weights: a run of n frames weighs clip((200 / n) ** p, 0.25, 4), p by weighting.
+    clip (p=1) is possession-equal; sqrt is milder; none weighs every frame the same."""
     w = np.ones(len(gt))
+    p = WEIGHTINGS[weighting]
     change = np.flatnonzero(np.diff(gt) != 0) + 1
     for s, e in zip(np.concatenate(([0], change)), np.concatenate((change, [len(gt)]))):
-        w[s:e] = np.clip(200.0 / (e - s), 0.25, 4.0)
+        w[s:e] = np.clip((200.0 / (e - s)) ** p, 0.25, 4.0)
     return w
+
+
+CONTEXT_WINDOWS = (1, 25, 75, 251, 501)     # frames, centred
+CONTEXT_SIDE = 250                          # 10 s looked at only before, or only after
+
+
+def _side_means(x, w):
+    """Mean of x over the w frames before each frame, and over the w frames after it."""
+    c = np.concatenate(([0.0], np.cumsum(x)))
+    n, pos = len(x), np.arange(len(x))
+    lo, hi = np.clip(pos - w, 0, n), np.clip(pos + 1 + w, 0, n)
+    past = (c[pos] - c[lo]) / np.maximum(pos - lo, 1)
+    future = (c[hi] - c[pos + 1]) / np.maximum(hi - pos - 1, 1)
+    return past, future
+
+
+def context_features(p_dead, p_home):
+    """Second stage: the first stage's own logits over windows up to +-10 s.
+    Team features are odd in the home logit, so swapping teams still flips P(home) exactly."""
+    eps = 1e-6
+    ld = np.log(np.clip(p_dead, eps, 1 - eps) / np.clip(1 - p_dead, eps, 1))
+    lh = np.log(np.clip(p_home, eps, 1 - eps) / np.clip(1 - p_home, eps, 1))
+    alive_lh = lh * (1 - p_dead)
+    xd = [rmean(ld, w) for w in CONTEXT_WINDOWS] + list(_side_means(ld, CONTEXT_SIDE)) + [
+        rmean(np.abs(lh), w) for w in (25, 251)]
+    xt = [rmean(lh, w) for w in CONTEXT_WINDOWS] + list(_side_means(lh, CONTEXT_SIDE)) + [
+        rmean(alive_lh, w) for w in (75, 251)]
+    return np.stack(xt, 1), np.stack(xd, 1)
 
 
 def controlled(gt, min_frames):
@@ -259,12 +292,13 @@ def controlled(gt, min_frames):
     return gt
 
 
-def training_rows(XT, XD, gt, half):
+def training_rows(XT, XD, gt, half, weighting="clip"):
     """Rows of one match-condition: (team X, team y, team weight, dead X, dead y)."""
     graded = (half > 0) & np.isin(gt, (H, A, D))
     idx = np.flatnonzero(graded)[::SUBSAMPLE]
     alive = idx[gt[idx] != D]
-    return (XT[alive], (gt[alive] == H) * 1.0, spell_weights(gt)[alive], XD[idx], (gt[idx] == D) * 1.0)
+    return (XT[alive], (gt[alive] == H) * 1.0, spell_weights(gt, weighting)[alive], XD[idx],
+            (gt[idx] == D) * 1.0)
 
 
 def fit(rows):
@@ -316,7 +350,7 @@ def probabilities(ev, player_xy, player_team, half, weights=None):
 
 # ---------------------------------------------------------------- training on the external matches
 def _match_rows(args):
-    dataset, match_id, real_missing, relabel = args
+    dataset, match_id, real_missing, relabel, weighting = args
     import rondo.signals  # noqa: F401
     from rondo.harness import score
     from rondo.signals import external
@@ -333,11 +367,11 @@ def _match_rows(args):
         ev, _ = M.build_evidence(ball, players, player_team, tuple(meta["pitch"]))
         XT, XD, names_team, names_dead = features(ev, players, player_team, truth["half"])
         out["{}_{}_{}".format(dataset, match_id, cond)] = training_rows(
-            XT, XD, controlled(gt, relabel), truth["half"])
+            XT, XD, controlled(gt, relabel), truth["half"], weighting)
     return out, names_team, names_dead
 
 
-def train(workers=3, path=WEIGHTS, log=print, relabel=0):
+def train(workers=3, path=WEIGHTS, log=print, relabel=0, weighting="clip"):
     """Refit both models on every external match x condition and rewrite the weights file.
     relabel > 0: train on controlled-possession labels (see controlled)."""
     from multiprocessing import Pool
@@ -347,7 +381,7 @@ def train(workers=3, path=WEIGHTS, log=print, relabel=0):
     rows = {}
     with Pool(workers) as pool:
         for out, names_team, names_dead in pool.imap_unordered(
-                _match_rows, [(d, m, real_missing, relabel) for d, m in score.available()]):
+                _match_rows, [(d, m, real_missing, relabel, weighting) for d, m in score.available()]):
             rows.update(out)
             log("features done: {} match-conditions".format(len(rows)))
     team, dead = fit([rows[name] for name in sorted(rows)])        # fixed order -> same sums every run
@@ -363,8 +397,10 @@ def main(argv=None):
     parser.add_argument("--out", default=WEIGHTS)
     parser.add_argument("--relabel", type=int, default=0,
                         help="train on controlled-possession labels: min frames of a real change")
+    parser.add_argument("--weighting", choices=sorted(WEIGHTINGS), default="clip",
+                        help="per-frame training weight by run length (see spell_weights)")
     args = parser.parse_args(argv)
-    print("wrote", train(args.workers, args.out, relabel=args.relabel))
+    print("wrote", train(args.workers, args.out, relabel=args.relabel, weighting=args.weighting))
 
 
 if __name__ == "__main__":

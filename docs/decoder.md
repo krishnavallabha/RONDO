@@ -71,6 +71,18 @@ Better on 9 of 9 matches and 41 of 45 match-conditions; below the 0.04 band on t
 `0e6a30c5…` (previous M7 `c6fbd909…`). Chosen on the harness only; on the public window the two
 tie (0.353 vs 0.363, both 26 possessions), well inside its noise.
 
+## Last-day experiments (Nov 16, all scored on controlled-possession truth, out-of-fold)
+
+| Change on top of relabelled M7 | Metrica | IDSSE | pred / true spells (M / I) | Verdict |
+|---|---|---|---|---|
+| **√ training weights** (`--weighting sqrt`: a run of n frames weighs (200/n)^0.5 instead of 200/n) | **+0.015** | **+0.006** | 0.94 / 0.84 | **shipped**: better on 7 of 9 matches, and under both realistic conditions (`n16dm`, `n13corrupt`) on both datasets |
+| Equal training weights (`none`) | −0.011 | −0.016 | 0.82 / 0.74 | worse |
+| Second-stage context model (first-stage logits over windows up to ±10 s, refit out-of-fold) | −0.022 | −0.008 | | worse alone |
+| Second stage on top of √ weights | +0.016 | +0.008 | | +0.001 / +0.002 over √ alone: not worth a second model |
+| 4-state decoder (dead-after-H / dead-after-A) | — | — | | not built: on the external matches the team before a stoppage restarts 43–62% of the time (about half), so the extra state carries no information |
+
+Shipped training command: `python -m rondo.signals.m7_learned train --relabel 50 --weighting sqrt`.
+
 ## Earlier decisions (heuristic emissions, Nov 14 morning)
 
 Ball conditions: `deadmiss` and `noisy` (deadmiss plus 1.6 m player noise). The noise was

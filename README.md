@@ -210,7 +210,7 @@ Provenance, label rules and the results-sheet columns: [docs/EXTERNAL_DATA.md](d
 - [ ] **Nov 13** First valid upload (Google Form)
 - [x] **Nov 14** Decoder: min_alive 75, fast chain Viterbi, M7 probability inputs. Boundary snapping and expected-F1 decoding integrated and tested on out-of-fold M7: both neutral, so off by default. No decoder setting moves the harness by more than the 0.04 band. See [docs/decoder.md](docs/decoder.md)
 - [x] **Nov 14** M7 learned emissions: harness 0.486 Metrica / 0.485 IDSSE vs heuristic 0.43 / 0.41 (out-of-fold)
-- [x] **Nov 16** M7 retrained on external labels relabelled to CHALLENGE.md's "controlled possession" (2 s): +0.022 IDSSE / +0.029 Metrica, better on 9 of 9 matches. Submission `0e6a30c5`
+- [x] **Nov 16** M7 retrained on external labels relabelled to CHALLENGE.md's "controlled possession" (2 s): +0.022 IDSSE / +0.029 Metrica, better on 9 of 9 matches; then √ training weights, +0.015 Metrica / +0.006 IDSSE more. Second-stage model and 4-state decoder tested or measured and dropped ([docs/decoder.md](docs/decoder.md))
 - [ ] **Nov 15** Add-ons (M4–M7), each kept only if it beats bootstrap noise
 - [ ] **Nov 16** Technical document, clean-clone reproduction, final upload
 

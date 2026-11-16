@@ -70,8 +70,15 @@ def load(dataset, match_id, condition, relabel=0):
     return ev, items
 
 
-def _pkind(relabel):
-    return "p" if not relabel else "p{}".format(relabel)
+def _pkind(relabel, weighting="clip", stage2=False):
+    return "p" + ("{}".format(relabel) if relabel else "") + (
+        "" if weighting == "clip" else "_" + weighting) + ("_s2" if stage2 else "")
+
+
+def _train_of(spec, relabel):
+    """(relabel, weighting, stage2) of the M7 an experiment decodes with."""
+    return (relabel if spec.get("train") == "ctl" else 0, spec.get("weighting", "clip"),
+            bool(spec.get("stage2")))
 
 
 def folds():
@@ -83,10 +90,10 @@ def folds():
     return [f for f in out if f]
 
 
-def oof_probabilities(relabel=0, log=print):
+def oof_probabilities(relabel=0, weighting="clip", log=print):
     """Cache (p_dead, p_home) for every match and condition from a model that never saw it,
     trained on labels relabelled to controlled possession when relabel > 0."""
-    kind = _pkind(relabel)
+    kind = _pkind(relabel, weighting)
     for held in folds():
         if all(os.path.isfile(_path(d, m, c, kind)) for d, m in held for c in CONDITIONS):
             continue
@@ -94,16 +101,44 @@ def oof_probabilities(relabel=0, log=print):
         for d, m in sorted(set(score.available()) - set(held)):
             for c in CONDITIONS:
                 _, it = load(d, m, c, relabel)
-                rows.append(M7.training_rows(it["XT"], it["XD"], it["gt"], it["half"]))
+                rows.append(M7.training_rows(it["XT"], it["XD"], it["gt"], it["half"], weighting))
         team, dead = M7.fit(rows)
         del rows
-        log("fold fitted, held out: {}".format(", ".join(m for _, m in held)))
+        log("fold fitted ({}), held out: {}".format(kind, ", ".join(m for _, m in held)))
         for d, m in held:
             for c in CONDITIONS:
                 _, it = load(d, m, c)
                 np.savez(_path(d, m, c, kind),
                          p_dead=1 / (1 + np.exp(-M7.logit(dead, it["XD"].astype(np.float64)))),
                          p_home=1 / (1 + np.exp(-M7.logit(team, it["XT"].astype(np.float64)))))
+
+
+def oof_stage2(relabel=0, weighting="clip", log=print):
+    """Second stage out-of-fold: fit on the training matches' out-of-fold first-stage
+    probabilities, apply to the held-out matches' own out-of-fold first stage.
+    shortcut: the training matches' first stage saw the held-out fold (standard stacking leak);
+    nested folds would remove it, worth it only if the gain is near the noise band."""
+    base, kind = _pkind(relabel, weighting), _pkind(relabel, weighting, True)
+
+    def ctx(d, m, c):
+        with np.load(_path(d, m, c, base)) as p:
+            return M7.context_features(p["p_dead"], p["p_home"])
+
+    for held in folds():
+        if all(os.path.isfile(_path(d, m, c, kind)) for d, m in held for c in CONDITIONS):
+            continue
+        rows = []
+        for d, m in sorted(set(score.available()) - set(held)):
+            for c in CONDITIONS:
+                _, it = load(d, m, c, relabel)
+                rows.append(M7.training_rows(*ctx(d, m, c), it["gt"], it["half"], weighting))
+        team, dead = M7.fit(rows)
+        log("stage 2 fitted ({}), held out: {}".format(kind, ", ".join(m for _, m in held)))
+        for d, m in held:
+            for c in CONDITIONS:
+                XT, XD = ctx(d, m, c)
+                np.savez(_path(d, m, c, kind), p_dead=1 / (1 + np.exp(-M7.logit(dead, XD))),
+                         p_home=1 / (1 + np.exp(-M7.logit(team, XT))))
 
 
 def decode_codes(ev, half, params):
@@ -143,6 +178,10 @@ EXPERIMENTS = {
     "m7c_min50": {"train": "ctl", "min_alive": 50},
     "m7c_min100": {"train": "ctl", "min_alive": 100},
     "m7c_min150": {"train": "ctl", "min_alive": 150},
+    "m7c_wnone": {"train": "ctl", "weighting": "none"},
+    "m7c_wsqrt": {"train": "ctl", "weighting": "sqrt"},
+    "m7c_wsqrt_s2": {"train": "ctl", "weighting": "sqrt", "stage2": True},
+    "m7c_s2": {"train": "ctl", "stage2": True},
 }
 BASE = "m7"
 
@@ -154,15 +193,15 @@ def score_match(args):
     for cond in CONDITIONS:
         ev, it = load(dataset, match_id, cond, relabel)
         probs = {}
-        for train, kind in (("raw", "p"), ("ctl", _pkind(relabel))):
-            if os.path.isfile(_path(dataset, match_id, cond, kind)):
-                with np.load(_path(dataset, match_id, cond, kind)) as p:
-                    probs[train] = dict(ev, p_dead=p["p_dead"], p_home=p["p_home"])
         gt, runs = it["gt"], pm.valid_runs(it["gt"])
         for name in names:
             spec = dict(EXPERIMENTS[name])
             use_m7 = spec.pop("m7", True)
-            train = spec.pop("train", "raw")
+            train = _train_of(spec, relabel)
+            spec.pop("train", None), spec.pop("weighting", None), spec.pop("stage2", None)
+            if use_m7 and train not in probs:
+                with np.load(_path(dataset, match_id, cond, _pkind(*train))) as p:
+                    probs[train] = dict(ev, p_dead=p["p_dead"], p_home=p["p_home"])
             params = dict(decoder.DEFAULTS, **spec)
             r = pm.spell_scores(gt, decode_codes(probs[train] if use_m7 else ev, it["half"], params),
                                 runs)
@@ -198,6 +237,8 @@ def main(argv=None):
     parser.add_argument("--relabel", type=int, default=0,
                         help="score (and train m7c) on controlled-possession truth: min frames")
     args = parser.parse_args(argv)
+    global BASE
+    BASE = "m7c" if args.relabel else "m7"   # what is shipped; deltas are against it
     names = [BASE] + [n for n in (args.exp or EXPERIMENTS) if n != BASE]
     if not args.relabel and any(EXPERIMENTS[n].get("train") == "ctl" for n in names):
         parser.error("m7c experiments need --relabel")
@@ -206,9 +247,11 @@ def main(argv=None):
     with Pool(args.workers) as pool:
         pool.map(build, [(d, m, real_missing) for d, m in matches])
         print("features cached")
-        oof_probabilities()
-        if args.relabel:
-            oof_probabilities(args.relabel)
+        for relabel, weighting, stage2 in sorted(
+                {_train_of(EXPERIMENTS[n], args.relabel) for n in names}):
+            oof_probabilities(relabel, weighting)
+            if stage2:
+                oof_stage2(relabel, weighting)
         results = [r for part in pool.imap_unordered(
             score_match, [(d, m, names, args.relabel) for d, m in matches]) for r in part]
     for r in sorted(results):

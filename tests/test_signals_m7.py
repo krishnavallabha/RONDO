@@ -75,6 +75,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(w[100], 0.5)
         self.assertEqual(w[-1], 0.25)
 
+    def test_context_features_flip_with_the_teams(self):
+        rng = np.random.default_rng(0)
+        p_dead, p_home = rng.random(3000), rng.random(3000)
+        xt, xd = m7.context_features(p_dead, p_home)
+        xt2, xd2 = m7.context_features(p_dead, 1 - p_home)
+        np.testing.assert_allclose(xt2, -xt, atol=1e-9)
+        np.testing.assert_allclose(xd2, xd, atol=1e-9)
+        self.assertTrue(np.isfinite(xt).all() and np.isfinite(xd).all())
+
     def test_controlled_merges_uncontrolled_touches_only(self):
         H, A, D = 0, 1, 2
         gt = np.array([H] * 100 + [A] * 10 + [H] * 5 + [A] * 100 + [D] * 50 + [A] * 10 + [H] * 100)
