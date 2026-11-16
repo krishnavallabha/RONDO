@@ -49,6 +49,24 @@ under-splits (0.69–0.89 predicted spells per true spell), while on our match M
 possessions than the target window suggests. That is a gap between the harness and our match,
 not a decoder setting.
 
+## Controlled-possession labels (Nov 16, `python -m rondo.m3_eval --relabel 50`)
+
+CHALLENGE.md: loose or contested ball stays with the last team; a change needs *controlled*
+possession ("keeps the ball for a few seconds"). The external labels flip on every touch, so they
+teach M7 to split too often. `m7_learned.controlled(gt, 50)` merges a team's alive run shorter
+than 2 s (fixed from the wording, not tuned) that directly follows the other team's run; runs after
+a stoppage are kept. Both models are scored on the relabelled truth, out-of-fold:
+
+| | Metrica | IDSSE | pred / true spells (M / I) |
+|---|---|---|---|
+| M7 as shipped (`c6fbd909`) | 0.558 | 0.587 | 1.29 / 1.05 |
+| **M7 trained on relabelled labels** | **0.587 (+0.029)** | **0.610 (+0.022)** | 1.14 / 0.97 |
+| Heuristic | 0.508 | 0.493 | 0.96 / 0.89 |
+
+Better on 9 of 9 matches and 41 of 45 match-conditions; below the 0.04 band on the mean.
+`min_alive` 50 / 100 / 150 on top: no further gain. On our match it cuts possessions from 406 to
+375 (6.2 → 5.7 per live minute). Retrain: `python -m rondo.signals.m7_learned train --relabel 50`.
+
 ## Earlier decisions (heuristic emissions, Nov 14 morning)
 
 Ball conditions: `deadmiss` and `noisy` (deadmiss plus 1.6 m player noise). The noise was

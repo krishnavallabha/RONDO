@@ -61,11 +61,17 @@ def build(args):
                  **{"ev_" + k: v for k, v in to_contract(ev).items()})
 
 
-def load(dataset, match_id, condition):
+def load(dataset, match_id, condition, relabel=0):
+    """(contract evidence, cached arrays); gt under controlled possession when relabel > 0."""
     with np.load(_path(dataset, match_id, condition, "x")) as data:
         items = {key: data[key] for key in data.files}
+    items["gt"] = M7.controlled(items["gt"], relabel)
     ev = {k[3:]: v for k, v in items.items() if k.startswith("ev_")}
     return ev, items
+
+
+def _pkind(relabel):
+    return "p" if not relabel else "p{}".format(relabel)
 
 
 def folds():
@@ -77,15 +83,17 @@ def folds():
     return [f for f in out if f]
 
 
-def oof_probabilities(log=print):
-    """Cache (p_dead, p_home) for every match and condition from a model that never saw it."""
+def oof_probabilities(relabel=0, log=print):
+    """Cache (p_dead, p_home) for every match and condition from a model that never saw it,
+    trained on labels relabelled to controlled possession when relabel > 0."""
+    kind = _pkind(relabel)
     for held in folds():
-        if all(os.path.isfile(_path(d, m, c, "p")) for d, m in held for c in CONDITIONS):
+        if all(os.path.isfile(_path(d, m, c, kind)) for d, m in held for c in CONDITIONS):
             continue
         rows = []
         for d, m in sorted(set(score.available()) - set(held)):
             for c in CONDITIONS:
-                _, it = load(d, m, c)
+                _, it = load(d, m, c, relabel)
                 rows.append(M7.training_rows(it["XT"], it["XD"], it["gt"], it["half"]))
         team, dead = M7.fit(rows)
         del rows
@@ -93,7 +101,7 @@ def oof_probabilities(log=print):
         for d, m in held:
             for c in CONDITIONS:
                 _, it = load(d, m, c)
-                np.savez(_path(d, m, c, "p"),
+                np.savez(_path(d, m, c, kind),
                          p_dead=1 / (1 + np.exp(-M7.logit(dead, it["XD"].astype(np.float64)))),
                          p_home=1 / (1 + np.exp(-M7.logit(team, it["XT"].astype(np.float64)))))
 
@@ -130,24 +138,34 @@ EXPERIMENTS = {
     "m7_snap25": {"snap": 25},
     "m7_snap50": {"snap": 50},
     "m7_mbr100": {"mbr": True, "mbr_n": 100},
+    # M7 retrained on controlled-possession labels (only with --relabel; scored on the same truth)
+    "m7c": {"train": "ctl"},
+    "m7c_min50": {"train": "ctl", "min_alive": 50},
+    "m7c_min100": {"train": "ctl", "min_alive": 100},
+    "m7c_min150": {"train": "ctl", "min_alive": 150},
 }
 BASE = "m7"
 
 
 def score_match(args):
     """[(name, dataset, condition, spellF1, n_pred, n_gt)] for one match (worker)."""
-    dataset, match_id, names = args
+    dataset, match_id, names, relabel = args
     out = []
     for cond in CONDITIONS:
-        ev, it = load(dataset, match_id, cond)
-        with np.load(_path(dataset, match_id, cond, "p")) as p:
-            m7 = dict(ev, p_dead=p["p_dead"], p_home=p["p_home"])
+        ev, it = load(dataset, match_id, cond, relabel)
+        probs = {}
+        for train, kind in (("raw", "p"), ("ctl", _pkind(relabel))):
+            if os.path.isfile(_path(dataset, match_id, cond, kind)):
+                with np.load(_path(dataset, match_id, cond, kind)) as p:
+                    probs[train] = dict(ev, p_dead=p["p_dead"], p_home=p["p_home"])
         gt, runs = it["gt"], pm.valid_runs(it["gt"])
         for name in names:
             spec = dict(EXPERIMENTS[name])
             use_m7 = spec.pop("m7", True)
+            train = spec.pop("train", "raw")
             params = dict(decoder.DEFAULTS, **spec)
-            r = pm.spell_scores(gt, decode_codes(m7 if use_m7 else ev, it["half"], params), runs)
+            r = pm.spell_scores(gt, decode_codes(probs[train] if use_m7 else ev, it["half"], params),
+                                runs)
             out.append((name, dataset, match_id, cond, r["mean_f1"], r["n_pred"], r["n_gt"]))
     return out
 
@@ -177,16 +195,22 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--exp", action="append", choices=sorted(EXPERIMENTS))
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--relabel", type=int, default=0,
+                        help="score (and train m7c) on controlled-possession truth: min frames")
     args = parser.parse_args(argv)
     names = [BASE] + [n for n in (args.exp or EXPERIMENTS) if n != BASE]
+    if not args.relabel and any(EXPERIMENTS[n].get("train") == "ctl" for n in names):
+        parser.error("m7c experiments need --relabel")
     real_missing = np.asarray(M.main()["ball_missing"]).copy()   # label-free, as M7 training
     matches = sorted(score.available())
     with Pool(args.workers) as pool:
         pool.map(build, [(d, m, real_missing) for d, m in matches])
         print("features cached")
         oof_probabilities()
-        results = [r for part in pool.imap_unordered(score_match, [(d, m, names) for d, m in matches])
-                   for r in part]
+        if args.relabel:
+            oof_probabilities(args.relabel)
+        results = [r for part in pool.imap_unordered(
+            score_match, [(d, m, names, args.relabel) for d, m in matches]) for r in part]
     for r in sorted(results):
         print("{:<13} {:<8} {:<14} {:<11} spellF1 {:.4f}  spells {}/{}".format(*r))
     summary(results, names)

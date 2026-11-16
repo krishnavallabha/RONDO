@@ -75,6 +75,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(w[100], 0.5)
         self.assertEqual(w[-1], 0.25)
 
+    def test_controlled_merges_uncontrolled_touches_only(self):
+        H, A, D = 0, 1, 2
+        gt = np.array([H] * 100 + [A] * 10 + [H] * 5 + [A] * 100 + [D] * 50 + [A] * 10 + [H] * 100)
+        out = m7.controlled(gt, 50)
+        self.assertTrue((out[:115] == H).all())       # A's 10-frame touch stays H's possession
+        self.assertTrue((out[115:215] == A).all())    # a controlled A run is a real change
+        np.testing.assert_array_equal(out[215:], gt[215:])   # short run after a restart is kept
+        np.testing.assert_array_equal(m7.controlled(gt, 1), gt)
+
 
 class ModelTests(unittest.TestCase):
 

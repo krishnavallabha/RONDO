@@ -242,6 +242,23 @@ def spell_weights(gt):
     return w
 
 
+def controlled(gt, min_frames):
+    """External labels under CHALLENGE.md's "controlled possession": a team's alive run shorter
+    than min_frames, straight after the other team's alive run, is a touch without control, so
+    possession stays with the last team. Runs after a stoppage are kept (a restart has a clear owner).
+    """
+    gt = np.array(gt, copy=True)
+    if min_frames <= 1:
+        return gt
+    change = np.flatnonzero(np.diff(gt) != 0) + 1
+    starts, ends = np.concatenate(([0], change)), np.concatenate((change, [len(gt)]))
+    for s, e in zip(starts[1:], ends[1:]):
+        prev = gt[s - 1]          # already relabelled, so a chain of short touches all merges
+        if gt[s] in (H, A) and prev in (H, A) and prev != gt[s] and e - s < min_frames:
+            gt[s:e] = prev
+    return gt
+
+
 def training_rows(XT, XD, gt, half):
     """Rows of one match-condition: (team X, team y, team weight, dead X, dead y)."""
     graded = (half > 0) & np.isin(gt, (H, A, D))
@@ -299,7 +316,7 @@ def probabilities(ev, player_xy, player_team, half, weights=None):
 
 # ---------------------------------------------------------------- training on the external matches
 def _match_rows(args):
-    dataset, match_id, real_missing = args
+    dataset, match_id, real_missing, relabel = args
     import rondo.signals  # noqa: F401
     from rondo.harness import score
     from rondo.signals import external
@@ -315,12 +332,14 @@ def _match_rows(args):
             [slow_noise(len(ball), sigma, 10 + i) for i in range(player_xy.shape[1])], 1)
         ev, _ = M.build_evidence(ball, players, player_team, tuple(meta["pitch"]))
         XT, XD, names_team, names_dead = features(ev, players, player_team, truth["half"])
-        out["{}_{}_{}".format(dataset, match_id, cond)] = training_rows(XT, XD, gt, truth["half"])
+        out["{}_{}_{}".format(dataset, match_id, cond)] = training_rows(
+            XT, XD, controlled(gt, relabel), truth["half"])
     return out, names_team, names_dead
 
 
-def train(workers=3, path=WEIGHTS, log=print):
-    """Refit both models on every external match x condition and rewrite the weights file."""
+def train(workers=3, path=WEIGHTS, log=print, relabel=0):
+    """Refit both models on every external match x condition and rewrite the weights file.
+    relabel > 0: train on controlled-possession labels (see controlled)."""
     from multiprocessing import Pool
     import rondo.signals  # noqa: F401
     from rondo.harness import score
@@ -328,7 +347,7 @@ def train(workers=3, path=WEIGHTS, log=print):
     rows = {}
     with Pool(workers) as pool:
         for out, names_team, names_dead in pool.imap_unordered(
-                _match_rows, [(d, m, real_missing) for d, m in score.available()]):
+                _match_rows, [(d, m, real_missing, relabel) for d, m in score.available()]):
             rows.update(out)
             log("features done: {} match-conditions".format(len(rows)))
     team, dead = fit([rows[name] for name in sorted(rows)])        # fixed order -> same sums every run
@@ -342,8 +361,10 @@ def main(argv=None):
     parser.add_argument("command", choices=["train"])
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--out", default=WEIGHTS)
+    parser.add_argument("--relabel", type=int, default=0,
+                        help="train on controlled-possession labels: min frames of a real change")
     args = parser.parse_args(argv)
-    print("wrote", train(args.workers, args.out))
+    print("wrote", train(args.workers, args.out, relabel=args.relabel))
 
 
 if __name__ == "__main__":
