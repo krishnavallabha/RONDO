@@ -1,4 +1,6 @@
-# RONDO: frame-by-frame possession for Barcelona vs Athletic Club
+# Possession in the Dark: Reading Barcelona vs Athletic When the Ball Disappears
+
+*RONDO, frame-by-frame possession from tracking where the ball is missing on 41% of frames*
 
 **Team:** The Misfits · **Repository:** https://github.com/krishnavallabha/RONDO ·
 **Submission:** `The Misfits.csv`, SHA-256 `744dd93f207172cc33c6f8f657abb0a4a31ff9dd9f9cb25b87e7da4cd95d5f46`
