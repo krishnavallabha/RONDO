@@ -1,7 +1,8 @@
 # RONDO: frame-by-frame possession for Barcelona vs Athletic Club
 
 **Team:** The Misfits · **Repository:** https://github.com/krishnavallabha/RONDO ·
-**Submission:** `The Misfits.csv`, SHA-256 `cf22e581cd83b3768e079f80e6122ff21699810975ca8b4bcb4517517e4472b0`
+**Submission:** `The Misfits.csv`, SHA-256 `744dd93f207172cc33c6f8f657abb0a4a31ff9dd9f9cb25b87e7da4cd95d5f46`
+(M8 emissions). The earlier M7 submission `cf22e581…` is reproduced by `--model m7`.
 
 ## 1. Approach
 
@@ -24,7 +25,7 @@ and needs only weak evidence to place a stoppage. Keeping evidence and decoding 
 tune each against labelled external matches separately.
 
 ```
-tracking (ATD) + Smart Tagging → M1 clean ball → M2 evidence → M7 p_dead, p_home → M3 HMM → CSV
+tracking (ATD) + Smart Tagging → M1 clean ball → M2 evidence → M8 p_dead, p_home → M3 HMM → CSV
 ```
 
 ## 2. Assets used, and how
@@ -45,6 +46,25 @@ tracking (ATD) + Smart Tagging → M1 clean ball → M2 evidence → M7 p_dead, 
   frame to 12 s, sustained control, touches as past and future decays, team width. Every feature
   is home minus away and every row is trained from both viewpoints, so swapping the teams gives
   exactly `1 − p_home`.
+
+**M8 stoppage model (submitted; `rondo/signals/m8_stoppage.py`).** On our match the ball is
+hidden through almost every long stoppage (98.6% of long slow gaps are already labelled dead), so
+the stoppages M7 misses are short ones with the ball in view. M8 keeps M7's team model, retrained
+on more conditions, and replaces the dead model with two LightGBM experts (LightGBM 4.6.0,
+deterministic, 300 trees): one for frames with the ball seen (M7's dead features plus 28 new ones),
+one for ball gaps (only features that do not read the ball). New features: player speed as
+within-match quantiles (mean, 90th percentile, share walking) over 0.04 / 3 / 10 s, a sustained
+slow-down, ball still for 1.5 s, distance to each line, and gap facts (length, time into it, time
+left, where the ball was last and next seen). Features that only identify the data source (number
+of tracked players, share standing, ball speed before a gap) are left out: a classifier separated
+every external match from ours on them alone.
+
+The extra training conditions come from a simulator that makes an external match's ball look like
+ours: each true stoppage is hidden (always if ≥ 10 s, otherwise 29%), the hidden span starts 2.8 s
+after the whistle and ends 3.4 s before the restart, plus label-independent dropouts (1.3 per
+minute); the ball is low-passed so fewer touches are credited, as on ours. Its parameters were
+fitted to our match's label-free statistics (missing share, gap lengths, gaps per minute, in-gap
+player speed, credited touches per minute). Three draws are used (`sim0..sim2`).
 
 The decoder divides the class prior out of the classifier posteriors (hybrid HMM/NN scaled
 likelihoods), because the transitions already carry it.
@@ -99,8 +119,22 @@ definition):
 Submitted model by condition (full / deadmiss / n10dm / n16dm / n13corrupt): Metrica 0.720 /
 0.670 / 0.594 / 0.553 / 0.474; IDSSE 0.722 / 0.670 / 0.627 / 0.569 / 0.492.
 
-**On our match (label-free):** 326 possessions (4.9 per live minute); 37.3% dead, 36.8% home,
-25.9% away of graded frames.
+**M8.** Leave-one-match-out, scored on the three simulator conditions (the ones made to look like
+our match) under a rule fixed in advance (mean gain ≥ 0.02 and above its standard error, ≥ 7 of 9
+matches better, none worse by more than 0.03, clean-ball score down by at most 0.01):
+
+| Model | Simulator spellF1 | Metrica | IDSSE | Clean ball | Short-stoppage recall |
+|---|---|---|---|---|---|
+| M7 (cf22e581) | 0.578 | 0.587 | 0.575 | 0.722 | 0.61 |
+| **M8 (submitted)** | **0.605** | **0.614** | **0.602** | **0.728** | **0.82** |
+
++0.027 ± 0.002, better on 9 of 9 matches (worst +0.016). About 0.020 of it is the dead experts
+and 0.007 the team model retrained on the simulator conditions.
+
+**On our match (label-free):** M8 gives 313 possessions (4.5 per live minute); 33.6% dead, 38.7%
+home, 27.7% away of graded frames (M7: 326, 4.9, 37.3 / 36.8 / 25.9). 7% of graded frames change.
+Our stoppages are shorter than in any external match under both models, so the duration check sits
+outside the external range for M7 too.
 
 **Public 5 minutes.** Used only as a correctness check (format, alignment, scorer wiring), never to
 choose anything. With 17 possessions its noise band is about ±0.28.
@@ -123,6 +157,10 @@ Each was scored on the harness above and kept only if it passed the rule in §3.
 | Broadcast-tracking ball fill | fills 6.2% of missing frames; the two balls disagree by > 3 m on 17.6% of shared frames | Too unreliable |
 | Broadcast "feed is off the pitch" dead-ball cue | real signal, but no external match to score it on | Unvalidated |
 | Ball detection on the video (two public YOLO models) | dead share falls to 22%, outside every external match (32–55%) | Unvalidated; no repository code reads the video |
+| M8 decoder re-tune (switch costs, dead prior and bias, emission temperature), nested | +0.000 | Defaults kept |
+| Snapping stoppage edges to the ball vanishing / returning | −0.007 to −0.055 | Worse |
+| Switch hazard from a learned interception detector | +1.5 points of switch recall within 2 s | Below the +10 points set in advance |
+| Ensembles (3 LightGBM seeds; plus M7-style logistic; plus calibration) | +0.000 to +0.001 over M8 | Within noise; not worth three models |
 
 ## 7. Limitations, and what we would do with more time
 
@@ -136,38 +174,41 @@ Each was scored on the harness above and kept only if it passed the rule in §3.
   timing error on our match is unknown.
 - **IDSSE splits possession about twice as finely as the target definition**, and 5 of its 7
   matches share a home team. The controlled-possession relabel corrects the first only partly.
-- **Throw-ins and fouls** are found mainly through the missing ball. When the ball stays visible
-  during a short stoppage, we can miss it.
+- **Throw-ins and fouls** with the ball in view are the hardest stoppages. M8 lifts short-stoppage
+  recall from 0.61 to 0.82 on the simulator, but the simulator is still a proxy (a classifier
+  tells it from our match with AUC 0.83–0.89).
 
 ## 8. Disclosure
 
 - No hand labels and no human-produced data about the provided game. The full-match ground truth
   is never read; the public 5 minutes are a correctness check only.
-- Everything learned or tuned is fitted on external matches. Two label-free quantities come from
-  this match's tracking: its missing-ball mask (transplanted into one training condition) and its
-  median player speed (used as a unit).
+- Everything learned or tuned is fitted on external matches. Label-free quantities from this
+  match's tracking: its missing-ball mask (transplanted into one training condition), its median
+  player speed (used as a unit), and for M8's simulator its gap statistics, in-gap player speed
+  and credited-touch rate.
 - Smart Tagging is used as automatic input, as the FAQ allows.
 - AI assistant: only aggregate numbers printed by our own scripts were shared. No match data,
   extract or frame-level file was uploaded to any AI service.
 - No match data or frame-level derived data is in the repository (`data/`, `out/` and `*.npz`
-  are gitignored). The committed weights are 105 coefficients plus feature means and scales,
-  fitted on external data.
+  are gitignored). The committed model files (M7 and M8 logistic weights, two LightGBM tree
+  files) are fitted on external data only.
 
 ## 9. Reproduction
 
-Python 3.13; dependencies pinned in `requirements.txt` (numpy 2.3.2, pandas 2.3.2, scipy 1.16.2).
+Python 3.12 or 3.13; dependencies pinned in `requirements.txt` (numpy 2.3.2, pandas 2.3.2,
+scipy 1.16.2, lightgbm 4.6.0).
 
 ```bash
 git clone https://github.com/krishnavallabha/RONDO.git && cd RONDO
 pip install -r requirements.txt
 export MTAH_DATA_DIR=/path/to/the/unpacked/data/bundle
-python -m rondo.signals.export --out out/evidence.npz          # tracking -> evidence, ~1 min
+python -m rondo.signals.export --out out/evidence.npz          # tracking -> evidence, a few min
 python -m rondo.run --evidence out/evidence.npz --out "out/The Misfits.csv"
 python more-than-a-hack-2027/evaluation/validate_submission.py "out/The Misfits.csv"
 ```
 
 From a fresh clone this reproduces the submitted file byte for byte (SHA-256 above). Optional:
 `python -m rondo.harness fetch && python -m rondo.harness labels` downloads the external data,
-`python -m rondo.signals.m7_learned train --relabel 50 --weighting sqrt` refits the committed
-weights, and `python -m rondo.m3_eval --relabel 50` reruns the decoder experiments.
+`python -m rondo.signals.m7_learned train --relabel 50 --weighting sqrt` refits the M7 weights,
+`python -m rondo.signals.m8_stoppage train` refits the M8 model files, and `python -m rondo.m3_eval --relabel 50` reruns the decoder experiments.
 `python -m unittest discover -s tests` runs the tests, which need no match data.

@@ -1,0 +1,2 @@
+# LightGBM model files: keep their bytes exactly as trained
+rondo/signals/m8_*.txt -text

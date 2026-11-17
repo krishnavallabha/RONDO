@@ -3,8 +3,9 @@
     python -m rondo.signals.export --out out/evidence.npz
     python -m rondo.signals.export --out out/evidence.npz --no-m7     # heuristic evidence only
 
-With M7 (the default) the file also carries p_dead and p_home from the learned emissions
-(rondo/signals/m7_learned.py); the decoder uses them when they are present.
+By default the file also carries p_dead and p_home from the learned emissions
+(rondo/signals/m8_stoppage.py; --model m7 for rondo/signals/m7_learned.py, the cf22e581
+submission); the decoder uses them when they are present.
 
 Any other match (the harness): build plain arrays, then
 
@@ -48,6 +49,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out", default=os.path.join("out", "evidence.npz"))
     parser.add_argument("--no-m7", action="store_true", help="leave out the learned p_dead / p_home")
+    parser.add_argument("--model", choices=["m8", "m7"], default="m8",
+                        help="learned emissions: m8 (stoppage experts, default) or m7 (cf22e581)")
     args = parser.parse_args(argv)
 
     m1 = m1_ingest.main(GAME)
@@ -55,10 +58,16 @@ def main(argv=None):
     if len(evidence["ball_missing"]) != GAMES[GAME]["n_video_frames"]:
         raise ValueError("evidence length does not match the tactical video")
     if not args.no_m7:
-        from rondo.signals import m7_learned
         from rondo.signals.m2_validate import real_half
-        evidence["p_dead"], evidence["p_home"] = m7_learned.probabilities(
-            evidence, m1["player_xy"], m1["player_team"], real_half(len(evidence["ball_missing"])))
+        half = real_half(len(evidence["ball_missing"]))
+        if args.model == "m8":
+            from rondo.signals import m8_stoppage
+            evidence["p_dead"], evidence["p_home"] = m8_stoppage.probabilities(
+                evidence, m1["player_xy"], m1["player_team"], half, tuple(GAMES[GAME]["pitch"]))
+        else:
+            from rondo.signals import m7_learned
+            evidence["p_dead"], evidence["p_home"] = m7_learned.probabilities(
+                evidence, m1["player_xy"], m1["player_team"], half)
     print("wrote", save(evidence, args.out))
 
 

@@ -73,8 +73,9 @@ python -m unittest discover -s tests -v
 With real evidence (needs the match data, see below):
 
 ```bash
-# M1 + M2: tracking data -> out/evidence.npz (under a minute)
+# M1 + M2 + M8: tracking data -> out/evidence.npz (a few minutes)
 python -m rondo.signals.export --out out/evidence.npz
+# (--model m7 gives the earlier M7 emissions, submission cf22e581)
 
 # M3: evidence -> validated submission CSV
 python -m rondo.run --evidence out/evidence.npz --out out/RONDO.csv
