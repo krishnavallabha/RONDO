@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Possession in the Dark</title>
+<!-- Source of "The Misfits.pdf". Rebuild:
+     chrome --headless=new --no-pdf-header-footer --print-to-pdf="out/The Misfits.pdf" docs/paper/paper.html -->
+<style>
+@page { size: A4; margin: 24mm 24mm 22mm 24mm;
+  @bottom-center { content: counter(page); font-family: "Times New Roman", Times, serif; font-size: 10pt; } }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-family: "Times New Roman", Times, serif; font-size: 10.6pt; line-height: 1.32;
+  color: #000; background: #fff; margin: 0; text-align: justify; hyphens: auto; }
+.title { text-align: center; font-size: 17.5pt; font-weight: bold; line-height: 1.2;
+  margin: 4pt 0 14pt; padding: 8pt 0; border-top: 3.5pt solid #000; border-bottom: 1pt solid #000; }
+.authors { display: flex; justify-content: center; gap: 34pt; text-align: center; margin-bottom: 6pt; }
+.authors div { font-size: 10pt; line-height: 1.25; }
+.authors b { font-size: 10.4pt; }
+.team { text-align: center; font-size: 10pt; margin: 4pt 0 16pt; }
+.mono, code { font-family: "Courier New", Courier, monospace; font-size: 9.2pt; }
+.abstract-h { text-align: center; font-weight: bold; font-size: 11.5pt; margin: 6pt 0 4pt; }
+.abstract { margin: 0 36pt 14pt; font-size: 10.2pt; }
+h2 { font-size: 12pt; font-weight: bold; margin: 15pt 0 6pt; text-align: left; }
+h3 { font-size: 10.6pt; font-weight: bold; margin: 10pt 0 4pt; text-align: left; }
+p { margin: 0 0 6pt; }
+ul { margin: 2pt 0 6pt; padding-left: 18pt; }
+li { margin: 1.5pt 0; }
+.eq { display: flex; align-items: center; margin: 7pt 0; }
+.eq .m { flex: 1; text-align: center; font-style: italic; }
+.eq .m span.r { font-style: normal; }
+.eq .n { width: 28pt; text-align: right; }
+table { border-collapse: collapse; margin: 0 auto; font-size: 9.4pt; line-height: 1.22; text-align: left; }
+table.full { width: 100%; }
+thead tr:first-child th { border-top: 1.2pt solid #000; }
+thead tr:last-child th { border-bottom: 0.6pt solid #000; padding-bottom: 3pt; }
+tbody tr:last-child td { border-bottom: 1.2pt solid #000; }
+th, td { padding: 2.2pt 6pt; vertical-align: top; }
+th { font-weight: bold; }
+td.c, th.c { text-align: center; }
+tr.mid td { border-top: 0.6pt solid #000; }
+.cap { font-size: 9.6pt; margin: 4pt 0 0; text-align: justify; }
+.cap b { font-weight: bold; }
+.tbl { margin: 10pt 0 12pt; page-break-inside: avoid; }
+.tbl .cap { margin: 0 0 5pt; }
+figure { margin: 10pt 0 12pt; page-break-inside: avoid; }
+figure svg { display: block; margin: 0 auto; }
+.refs { font-size: 9.4pt; }
+.refs p { padding-left: 18pt; text-indent: -18pt; margin: 0 0 3pt; text-align: left; }
+.small { font-size: 9.4pt; }
+pre { font-family: "Courier New", Courier, monospace; font-size: 8.6pt; line-height: 1.3;
+  margin: 6pt 0; padding: 5pt 8pt; border-left: 1.2pt solid #000; white-space: pre-wrap; text-align: left; }
+.nb { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<div class="title">Possession in the Dark: Reading Barcelona vs Athletic<br>When the Ball Disappears</div>
+
+<div class="authors">
+  <div><b>Signals</b><br>The Misfits<br><span class="small">evidence &amp; learned emissions</span></div>
+  <div><b>Decoder</b><br>The Misfits<br><span class="small">sequence model &amp; decoding</span></div>
+  <div><b>Harness</b><br>The Misfits<br><span class="small">validation &amp; reproducibility</span></div>
+</div>
+<div class="team">More Than A Hack 2027 &middot; <span class="mono">github.com/krishnavallabha/RONDO</span></div>
+
+<div class="abstract-h">Abstract</div>
+<div class="abstract">
+We label every frame of a football match (25 fps, 199,319 frames) as home possession, away
+possession or dead ball, from automatic player and ball tracking in which the ball is missing on
+41% of the graded frames. The ranking metric, spellF1, rewards whole possessions matched by
+temporal overlap rather than per-frame accuracy, so we separate the problem into per-frame
+evidence and a sequence decoder. Two learned emission models give, for every frame, the
+probability that the ball is dead and the probability that the home team has it; an
+explicit-duration hidden Markov model turns these into possessions under the challenge's rules.
+No label of the target match is used: every model and setting is fitted on nine labelled
+external matches, degraded by a simulator whose parameters are matched to label-free statistics of
+our match. Relabelling the training data to the challenge's notion of <i>controlled</i>
+possession, square-root possession weighting, and a gated gradient-boosted stoppage model (M8)
+take held-out spellF1 from 0.51 to 0.61. We also report fifteen ideas that did not pass a
+pre-registered keep rule. The submission is reproduced byte for byte from a fresh clone.
+</div>
+
+<h2>1&nbsp;&nbsp;Introduction</h2>
+<p>Who has the ball is the most basic fact of a football match, yet tracking data alone does not
+state it. The task here is to recover it frame by frame for one La Liga match, FC Barcelona vs
+Athletic Club, as one of four labels: <i>H</i> (home possession, ball alive), <i>A</i> (away
+possession), <i>D</i> (dead ball) and <i>X</i> (outside the halves). The organisers score the
+labels with spellF1: predicted and true possession runs are matched by temporal intersection over
+union and an F1 is averaged over overlap thresholds, with per-frame macro-F1 as the tie-break.</p>
+<p>Two properties of the data shape our approach. First, the ball is missing on 41% of graded
+frames, 85% of them in gaps longer than 10 s, and players move at 1.00 m/s while it is missing
+against 1.94 m/s while it is seen. A missing ball is therefore itself evidence, mostly of a
+stoppage. Second, the metric punishes fragmentation: a frame classifier that flickers creates
+false possessions that each cost a match. Both point to a model that reasons over time and can
+carry a possession across a gap.</p>
+<p>Our contributions are: (i) a split between learned per-frame emissions and a duration-constrained
+decoder, with posteriors converted to scaled likelihoods (§3); (ii) a validation harness that
+degrades nine labelled external matches to resemble ours, including a simulator fitted to our
+match's label-free statistics (§4); (iii) training labels relabelled to the challenge's
+definition of controlled possession, and a gated stoppage model for short stoppages with the ball
+in view (§3.3–3.4); and (iv) a record of what did not work, each judged by a rule fixed in
+advance (§6).</p>
+
+<h2>2&nbsp;&nbsp;Related Work</h2>
+<p><b>Possession and events from tracking.</b> Link and Hoernig [1] define individual possession
+from ball acceleration peaks and player proximity, with team possession persisting until an
+opponent gains individual possession, the same idea as the challenge's controlled possession.
+Vidal-Codina et al. [2] detect passes, shots and restarts from tracking and classify restarts by
+player geometry. When the ball is unobserved, Kim et al. [3] infer its trajectory from players
+alone (team-possession accuracy 85% with no ball, 97% with 20% of ball samples), and
+TranSPORTmer [4] classifies ball states including out-of-play with 80.8% frame accuracy with the
+ball fully masked. Our setting sits between these: the ball is partly seen, and its absence is
+informative.</p>
+<p><b>Temporal segmentation.</b> In action segmentation, multi-stage temporal networks [5] and
+boundary-aware refinement [6] raise segmental F1 far more than frame accuracy, mostly by
+suppressing over-segmentation. Stacked sequential learning [7] feeds out-of-fold predictions of
+neighbouring frames to a second learner. We use the older, more data-efficient route of a hybrid
+model: discriminative frame posteriors divided by class priors as HMM emissions [8], decoded
+under explicit duration constraints in the manner of hidden semi-Markov models [9].</p>
+<p><b>Training under shift.</b> Our external matches have cleaner balls than the target. Domain
+randomisation [10] trains over a range of synthetic corruptions so that the real data looks like
+one more variation, and ensembles are the most robust predictors under shift [11]. We randomise
+corruption around values fitted to the target's label-free statistics and validate only on
+held-out external matches.</p>
+
+<h2>3&nbsp;&nbsp;Method</h2>
+
+<figure>
+<svg width="600" height="132" viewBox="0 0 600 132" font-family="Times New Roman, Times, serif" font-size="11">
+  <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#000"/></marker></defs>
+  <g stroke="#000" stroke-width="0.9" fill="none">
+    <rect x="2" y="30" width="86" height="46"/>
+    <rect x="108" y="30" width="86" height="46"/>
+    <rect x="214" y="30" width="96" height="46"/>
+    <rect x="330" y="8" width="108" height="40" stroke-dasharray="0"/>
+    <rect x="330" y="58" width="108" height="40"/>
+    <rect x="458" y="30" width="78" height="46"/>
+    <rect x="552" y="38" width="44" height="30"/>
+    <line x1="88" y1="53" x2="106" y2="53" marker-end="url(#ar)"/>
+    <line x1="194" y1="53" x2="212" y2="53" marker-end="url(#ar)"/>
+    <line x1="310" y1="45" x2="328" y2="30" marker-end="url(#ar)"/>
+    <line x1="310" y1="62" x2="328" y2="76" marker-end="url(#ar)"/>
+    <line x1="438" y1="28" x2="456" y2="44" marker-end="url(#ar)"/>
+    <line x1="438" y1="78" x2="456" y2="62" marker-end="url(#ar)"/>
+    <line x1="536" y1="53" x2="550" y2="53" marker-end="url(#ar)"/>
+  </g>
+  <g text-anchor="middle" fill="#000">
+    <text x="45" y="50">Tracking</text><text x="45" y="64" font-size="9.5">ATD + Smart Tagging</text>
+    <text x="151" y="50">M1 Clean</text><text x="151" y="64" font-size="9.5">ball rules</text>
+    <text x="262" y="50">M2 Evidence</text><text x="262" y="64" font-size="9.5">touches, control, gaps</text>
+    <text x="384" y="25">M8 dead experts</text><text x="384" y="39" font-size="9.5">LightGBM, gated</text>
+    <text x="384" y="75">Team model</text><text x="384" y="89" font-size="9.5">logistic, symmetric</text>
+    <text x="497" y="50">M3 Decoder</text><text x="497" y="64" font-size="9.5">duration HMM</text>
+    <text x="574" y="57">CSV</text>
+    <text x="447" y="124" font-size="11" font-style="italic">p<tspan font-size="8" dy="3">dead</tspan><tspan dy="-3">, p</tspan><tspan font-size="8" dy="3">home</tspan><tspan dy="-3" font-style="normal"> per frame</tspan></text>
+  </g>
+  <line x1="447" y1="111" x2="447" y2="64" stroke="#000" stroke-width="0.5" stroke-dasharray="2,2"/>
+</svg>
+<div class="cap"><b>Figure 1:</b> The RONDO pipeline. Tracking is cleaned (M1) and turned into
+per-frame evidence (M2). Two learned models give <i>p</i><sub>dead</sub> and
+<i>p</i><sub>home</sub> per frame; the decoder (M3) turns them into possessions, one half at a
+time. Every learned or tuned part is fitted on external matches only.</div>
+</figure>
+
+<h3>3.1&nbsp;&nbsp;Evidence</h3>
+<p>The ball track is cleaned by fixed physical rules: positions more than 10 m off the pitch and
+jumps faster than 40 m/s are dropped, short excursions are removed, gaps up to 0.5 s (2 s when
+entry and exit velocities agree) are interpolated, and each stretch is smoothed with a
+zero-phase 1.25 Hz filter. From the cleaned data we compute touches, sustained control,
+distances to the lines, ball-gap facts and player-movement statistics. Smart Tagging set-piece
+intervals mark restarts; the restart frame is localised from tracking, and the taking team pulls
+the team share over &plusmn;10 frames. Kick-off owners follow from Law 8 positions.</p>
+
+<h3>3.2&nbsp;&nbsp;Emissions and decoding</h3>
+<p>The emission models output <i>p</i><sub>dead</sub>(<i>t</i>) and
+<i>p</i><sub>home</sub>(<i>t</i>), the probability that the home team has the ball given it is
+alive. They give a posterior over the three states,</p>
+<div class="eq"><div class="m">P(H | x<sub>t</sub>) = (1 &minus; p<sub>dead</sub>) p<sub>home</sub>,&nbsp;&nbsp;
+P(A | x<sub>t</sub>) = (1 &minus; p<sub>dead</sub>)(1 &minus; p<sub>home</sub>),&nbsp;&nbsp;
+P(D | x<sub>t</sub>) = p<sub>dead</sub>.</div><div class="n">(1)</div></div>
+<p>Because the transitions already carry the class prior, we divide it out and use scaled
+likelihoods as emissions [8], with &pi; = ((1&minus;q)/2, (1&minus;q)/2, q) and q = 0.42, the dead
+share of the training matches:</p>
+<div class="eq"><div class="m">log b<sub>s</sub>(x<sub>t</sub>) = log P(s | x<sub>t</sub>) &minus; log &pi;<sub>s</sub>.</div><div class="n">(2)</div></div>
+<p>Each state is expanded into a chain of sub-states so that a possession lasts at least
+<i>d</i><sub>H</sub> = <i>d</i><sub>A</sub> = 75 frames (3 s) and a stoppage at least
+<i>d</i><sub>D</sub> = 25 frames (1 s); a spell cannot re-enter its own chain. Direct H&harr;A
+transitions (interceptions) are allowed but cost more than passing through D. The labels are
+the Viterbi path</p>
+<div class="eq"><div class="m">&#349;<sub>1:T</sub> = argmax<sub>s<sub>1:T</sub></sub> &Sigma;<sub>t</sub> [ log b<sub>s<sub>t</sub></sub>(x<sub>t</sub>) + log a(s<sub>t&minus;1</sub>, s<sub>t</sub>) ]&nbsp;&nbsp;<span class="r">subject to</span>&nbsp;&nbsp;every run of state s lasting &ge; d<sub>s</sub>,</div><div class="n">(3)</div></div>
+<p>computed per half with a chain-structured recursion in O(K) per frame for K = 175 sub-states
+(about 3 s per half). A test checks it against dense Viterbi.</p>
+
+<h3>3.3&nbsp;&nbsp;Training labels and weights</h3>
+<p>The challenge states that a loose or contested ball stays with the last team and a change
+needs controlled possession. The external labels flip on every touch, so they teach a model to
+split too often. We relabel: an alive run of team <i>k</i> shorter than 50 frames (2 s, fixed
+from the wording, not tuned) that directly follows a run of the other team is given to that team.
+Runs after a stoppage are kept. Because spellF1 counts possessions rather than frames, each
+training frame in a run of <i>n</i> frames is weighted by</p>
+<div class="eq"><div class="m">w(n) = clip( (200 / n)<sup>1/2</sup>, 0.25, 4 ).</div><div class="n">(4)</div></div>
+<p>The team model (50 features: soft ball-to-team proximity over windows from one frame to 12 s,
+sustained control, touch decays, team width) is a logistic regression without intercept on
+home-minus-away features, trained from both viewpoints, so swapping the teams gives exactly
+1 &minus; <i>p</i><sub>home</sub>.</p>
+
+<h3>3.4&nbsp;&nbsp;M8: a gated stoppage model</h3>
+<p>On our match 98.6% of long, slow ball gaps are already labelled dead, so the stoppages an
+earlier model (M7) missed were short ones with the ball in view: throw-ins, fouls, quick
+restarts. M8 replaces the dead model with two LightGBM [12] experts, chosen by whether the ball
+is seen at frame <i>t</i>:</p>
+<div class="eq"><div class="m">p<sub>dead</sub>(t) = f<sub>vis</sub>(x<sub>t</sub>) &nbsp;<span class="r">if the ball is seen,</span>&nbsp;&nbsp; f<sub>gap</sub>(x&#771;<sub>t</sub>) &nbsp;<span class="r">otherwise,</span></div><div class="n">(5)</div></div>
+<p>where <i>x&#771;</i> drops every feature that reads the ball. New features are player speed as
+within-match quantiles (mean, 90th percentile, share walking) over 0.04, 3 and 10 s, a sustained
+slow-down, the ball standing still for 1.5 s, distance to each line, and gap facts (length, time
+into it, time left, where the ball was last and next seen). Features that only identify the data
+source, such as the number of tracked players, are removed after an adversarial check separated
+every external match from ours on them alone. Each expert has 300 trees, deterministic settings,
+and a class weight of 1.5 on dead rows that is undone at prediction time.</p>
+
+<h2>4&nbsp;&nbsp;Data and Validation Protocol</h2>
+<p><b>Training data.</b> No label of the provided match is used. All labels come from nine
+matches of other games (Table 1).</p>
+
+<div class="tbl">
+<div class="cap"><b>Table 1:</b> Labelled external data. Provenance, checksums and label rules are in
+<span class="mono">docs/EXTERNAL_DATA.md</span>.</div>
+<table class="full">
+<thead><tr><th>Dataset</th><th class="c">Matches</th><th>Labels and who made them</th><th>Licence</th></tr></thead>
+<tbody>
+<tr><td>IDSSE Bundesliga open data [13]</td><td class="c">7</td><td>provider's per-frame <span class="mono">BallStatus</span> and <span class="mono">BallPossession</span></td><td>CC BY 4.0</td></tr>
+<tr><td>Metrica Sports sample, games 1&ndash;2</td><td class="c">2</td><td>Metrica's hand-coded events; frame labels derived by fixed rules</td><td>CC BY-NC 4.0</td></tr>
+</tbody></table>
+</div>
+
+<p><b>Degradation.</b> External balls are much cleaner than ours, so every match is used under
+several conditions: <i>full</i> (unchanged); <i>deadmiss</i> (78% of stoppages and 13% of contacts
+hidden); <i>n10dm</i> and <i>n16dm</i> (deadmiss plus 1.0 / 1.6 m of player noise drifting over
+4 s); <i>n13corrupt</i> (our missing-ball mask transplanted, plus 1.3 m noise); and, for M8, three
+simulator draws <i>sim0&ndash;sim2</i>. The simulator hides each true stoppage (always if
+&ge; 10 s, otherwise with probability 0.29) from 2.8 s after the whistle to 3.4 s before the
+restart, adds label-independent dropouts (1.3 per minute), and low-passes the ball so fewer
+touches are credited. Its parameters are fitted to our match's label-free statistics: missing
+share, gap lengths, gaps per minute, in-gap player speed and credited touches per minute.</p>
+<p><b>Protocol.</b> Models are refit out of fold, so a match is never scored by a model that saw
+it. Scoring calls the organisers' <span class="mono">possession_metrics</span> through our real
+decoder. For M8 the keep rule was written before any run: mean gain &ge; 0.02 and above its
+standard error, at least 7 of 9 matches better, none worse by more than 0.03, and clean-ball
+spellF1 down by at most 0.01. The public five-minute window (17 possessions, noise about
+&plusmn;0.28) was used only as a correctness check.</p>
+
+<h2>5&nbsp;&nbsp;Results</h2>
+
+<div class="tbl">
+<div class="cap"><b>Table 2:</b> Held-out spellF1, mean over the five original conditions, scored on
+controlled-possession truth. Pred/true is predicted possessions per true possession.</div>
+<table class="full">
+<thead><tr><th>Model</th><th class="c">Metrica</th><th class="c">IDSSE</th><th class="c">Pred / true (M / I)</th></tr></thead>
+<tbody>
+<tr><td>Heuristic evidence only</td><td class="c">0.508</td><td class="c">0.493</td><td class="c">0.96 / 0.89</td></tr>
+<tr><td>M7, trained on raw provider labels</td><td class="c">0.558</td><td class="c">0.587</td><td class="c">1.29 / 1.05</td></tr>
+<tr><td>M7, trained on controlled-possession labels</td><td class="c">0.587</td><td class="c">0.610</td><td class="c">1.14 / 0.97</td></tr>
+<tr><td>M7, controlled labels + &radic; weights (Eq. 4)</td><td class="c"><b>0.602</b></td><td class="c"><b>0.616</b></td><td class="c">0.94 / 0.84</td></tr>
+</tbody></table>
+</div>
+
+<p>Relabelling to controlled possession helps on 9 of 9 matches and cuts over-splitting; square-root
+weighting adds a further gain and brings the possession count below one per true possession.
+By condition, the last row scores 0.720 / 0.670 / 0.594 / 0.553 / 0.474 on Metrica and
+0.722 / 0.670 / 0.627 / 0.569 / 0.492 on IDSSE (full / deadmiss / n10dm / n16dm / n13corrupt).</p>
+
+<div class="tbl">
+<div class="cap"><b>Table 3:</b> M8 against M7, leave-one-match-out on the three simulator
+conditions. Short-stoppage recall is the share of true short stoppages found.</div>
+<table class="full">
+<thead><tr><th>Model</th><th class="c">Simulator</th><th class="c">Metrica</th><th class="c">IDSSE</th><th class="c">Clean ball</th><th class="c">Short-stoppage recall</th></tr></thead>
+<tbody>
+<tr><td>M7 (previous submission)</td><td class="c">0.578</td><td class="c">0.587</td><td class="c">0.575</td><td class="c">0.722</td><td class="c">0.61</td></tr>
+<tr><td><b>M8 (submitted)</b></td><td class="c"><b>0.605</b></td><td class="c"><b>0.614</b></td><td class="c"><b>0.602</b></td><td class="c"><b>0.728</b></td><td class="c"><b>0.82</b></td></tr>
+</tbody></table>
+</div>
+
+<p>M8 gains +0.027 &plusmn; 0.002 and is better on 9 of 9 matches (worst +0.016), passing the
+pre-registered rule; about 0.020 comes from the dead experts and 0.007 from retraining the team
+model on the simulator conditions. On our match, without labels, M8 gives 313 possessions
+(4.5 per live minute) and labels 33.6% of graded frames dead, 38.7% home and 27.7% away; 7% of
+graded frames change relative to M7. On the public window, checked once for defects, M8 scores
+0.482 spellF1 against M7's 0.433, a difference well inside the window's noise.</p>
+
+<p><b>Decoder behaviour.</b> When a stoppage is found, its boundaries have a median error of
+0 frames. Direct H&harr;A switches show no bias but an interquartile spread of about
+&plusmn;18 frames, and only 33&ndash;62% of true switches have a predicted switch within 2 s.
+Moving switches to the new owner's first touch changes nothing, so the loss is in switches the
+model misses, not in their timing.</p>
+
+<h2>6&nbsp;&nbsp;What Did Not Work</h2>
+<p>Every idea below was scored on the same harness and dropped under the keep rule. We report
+them because they bound where the remaining error is.</p>
+
+<div class="tbl">
+<div class="cap"><b>Table 4:</b> Ablations and dropped ideas (change in held-out spellF1, Metrica /
+IDSSE unless stated).</div>
+<table class="full">
+<thead><tr><th style="width:52%">Idea</th><th style="width:22%">Result</th><th>Reason</th></tr></thead>
+<tbody>
+<tr><td>Expected-F1 (minimum Bayes risk) decoding, 40 / 100 samples</td><td>&minus;0.002 / &minus;0.005</td><td>neutral once calibrated</td></tr>
+<tr><td>Minimum durations 2 / 4 / 6 s; other switch costs and priors</td><td>&le; &plusmn;0.013</td><td>decoder saturated</td></tr>
+<tr><td>Snapping H&harr;A switches to touches</td><td>&plusmn;0.003</td><td>timing is not the loss</td></tr>
+<tr><td>Second-stage context model over &plusmn;10 s of first-stage output</td><td>+0.001 / +0.002</td><td>not worth a second model</td></tr>
+<tr><td>Four-state decoder (dead after H / dead after A)</td><td>not built</td><td>same team restarts only 43&ndash;62%</td></tr>
+<tr><td>Equal training weights</td><td>&minus;0.011 / &minus;0.016</td><td>worse</td></tr>
+<tr><td>Dead evidence before simulated Smart Tagging restarts</td><td>to &minus;0.011 (IDSSE)</td><td>worse; restart pull itself harmless</td></tr>
+<tr><td>Team-shape features; wider touch or control radius; strict control</td><td>&minus;0.07 to +0.014</td><td>below the bar</td></tr>
+<tr><td>20 SkillCorner matches added to training</td><td>&plusmn;0.003 / &minus;0.01</td><td>no gain</td></tr>
+<tr><td>Broadcast-tracking ball fill</td><td>fills 6.2% of gaps</td><td>balls disagree &gt; 3 m on 17.6%</td></tr>
+<tr><td>Ball detection on video (two public detectors)</td><td>dead share 22%</td><td>outside all external matches</td></tr>
+<tr><td>M8 decoder re-tune, nested</td><td>+0.000</td><td>defaults kept</td></tr>
+<tr><td>Snapping stoppage edges to ball vanish / return</td><td>&minus;0.007 to &minus;0.055</td><td>worse</td></tr>
+<tr><td>Switch hazard from a learned interception detector</td><td>+1.5 pt switch recall</td><td>below +10 pt target</td></tr>
+<tr><td>Ensembles (seeds, logistic mix, calibration)</td><td>+0.000 to +0.001</td><td>within noise</td></tr>
+</tbody></table>
+</div>
+
+<p>The pattern is consistent: every change to the decoder was neutral, while changes to the
+evidence and to the training labels moved the score. The decoder is saturated, and the remaining
+error is in what the evidence cannot see.</p>
+
+<h2>7&nbsp;&nbsp;Possession Rules Implemented</h2>
+<div class="tbl">
+<table class="full">
+<thead><tr><th style="width:28%">Situation</th><th>Rule</th></tr></thead>
+<tbody>
+<tr><td>Loose ball, deflection, lone touch</td><td>Stays with the last team: 2 s controlled-possession relabel in training, 3 s minimum possession in decoding.</td></tr>
+<tr><td>Contested ball, duel</td><td>No change until one team keeps the ball.</td></tr>
+<tr><td>Change of possession</td><td>Needs a sustained run of the other team's evidence; direct H&harr;A allowed but costlier than via D.</td></tr>
+<tr><td>Ball out of play, fouls</td><td>D. Missing ball with slow players, ball still, or last seen out or near a line.</td></tr>
+<tr><td>Restarts</td><td>To the taking team: Smart Tagging team tag, tracking for untagged throw-ins, Law 8 for kick-offs, the conceding team after a goal.</td></tr>
+<tr><td>Outside the halves</td><td>X; each half decoded alone.</td></tr>
+</tbody></table>
+</div>
+
+<h2>8&nbsp;&nbsp;Limitations</h2>
+<ul>
+<li><b>The harness is a proxy.</b> A classifier still tells the simulator from our match
+(AUC 0.83&ndash;0.89, against 0.91 for the older conditions), and touches near a player are three
+times rarer on our match than on any external match.</li>
+<li><b>Interceptions are the main loss.</b> Only a third to two thirds of direct switches are
+found within 2 s. Ball detection on video, validated on labelled external video, is the next step.</li>
+<li><b>Smart Tagging cannot be validated directly</b>; we simulate it from external truth, but
+its timing error on our match is unknown.</li>
+<li><b>Label conventions differ.</b> IDSSE splits possession about twice as finely as the target
+definition, and 5 of its 7 matches share a home team.</li>
+<li><b>Stoppage durations.</b> Our match's predicted stoppages are shorter than in any external
+match under both M7 and M8, and its dead share (33.6%) is below typical league values.</li>
+</ul>
+
+<h2>9&nbsp;&nbsp;Reproducibility and Disclosure</h2>
+<p>Python 3.12/3.13 with pinned numpy 2.3.2, pandas 2.3.2, scipy 1.16.2 and LightGBM 4.6.0.
+From a fresh clone and the data bundle:</p>
+<pre>pip install -r requirements.txt
+export MTAH_DATA_DIR=/path/to/data/bundle
+python -m rondo.signals.export --out out/evidence.npz
+python -m rondo.run --evidence out/evidence.npz --out "out/The Misfits.csv"</pre>
+<p>This reproduces the submitted file byte for byte (SHA-256 <span class="mono">744dd93f207172cc&hellip;</span>);
+<span class="mono">--model m7</span> reproduces the previous submission
+(<span class="mono">cf22e581&hellip;</span>). Training commands for M7 and M8 and the decoder
+experiments are in the repository; the tests need no match data.</p>
+<p class="nb"><b>Disclosure.</b> No hand labels and no human-produced data about the provided
+match are used; its full ground truth is never read, and the public window is a correctness
+check only. Label-free quantities taken from its tracking are the missing-ball mask, the median
+player speed, and the simulator's fitting statistics. Smart Tagging is used as automatic input,
+as the FAQ allows. Only aggregate numbers from our own scripts were shared with an AI assistant;
+no match data was uploaded to any AI service. No match data is in the repository; the committed
+model files are fitted on external data only.</p>
+
+<h2>References</h2>
+<div class="refs">
+<p>[1] D. Link and M. Hoernig. Individual ball possession in soccer. <i>PLoS ONE</i>, 12(7):e0179953, 2017.</p>
+<p>[2] F. Vidal-Codina, N. Evans, B. El Fakir, and J. Billingham. Automatic event detection in football using tracking data. <i>Sports Engineering</i>, 25(1):18, 2022.</p>
+<p>[3] H. Kim, H. Choi, C. Kim, J. Yoon, and S.-K. Ko. Ball trajectory inference from multi-agent sports contexts using set transformer and hierarchical Bi-LSTM. In <i>KDD</i>, 2023.</p>
+<p>[4] G. Capellera, L. Ferraz, A. Rubio, A. Agudo, and F. Moreno-Noguer. TranSPORTmer: A holistic approach to trajectory understanding in multi-agent sports. In <i>ACCV</i>, 2024.</p>
+<p>[5] Y. A. Farha and J. Gall. MS-TCN: Multi-stage temporal convolutional network for action segmentation. In <i>CVPR</i>, 2019.</p>
+<p>[6] Y. Ishikawa, S. Kasai, Y. Aoki, and H. Kataoka. Alleviating over-segmentation errors by detecting action boundaries. In <i>WACV</i>, 2021.</p>
+<p>[7] W. W. Cohen and V. R. Carvalho. Stacked sequential learning. In <i>IJCAI</i>, 2005.</p>
+<p>[8] H. Bourlard and N. Morgan. <i>Connectionist Speech Recognition: A Hybrid Approach</i>. Kluwer, 1994.</p>
+<p>[9] S.-Z. Yu. Hidden semi-Markov models. <i>Artificial Intelligence</i>, 174(2):215&ndash;243, 2010.</p>
+<p>[10] J. Tobin, R. Fong, A. Ray, J. Schneider, W. Zaremba, and P. Abbeel. Domain randomization for transferring deep neural networks from simulation to the real world. In <i>IROS</i>, 2017.</p>
+<p>[11] Y. Ovadia, E. Fertig, J. Ren, et al. Can you trust your model's uncertainty? Evaluating predictive uncertainty under dataset shift. In <i>NeurIPS</i>, 2019.</p>
+<p>[12] G. Ke, Q. Meng, T. Finley, et al. LightGBM: A highly efficient gradient boosting decision tree. In <i>NeurIPS</i>, 2017.</p>
+<p>[13] M. Bassek, R. Rein, H. Weber, and D. Memmert. An integrated dataset of spatiotemporal and event data in elite soccer. <i>Scientific Data</i>, 2025.</p>
+</div>
+
+</body>
+</html>
